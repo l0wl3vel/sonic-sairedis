@@ -56,6 +56,9 @@
 #include <vpp_plugins/tunterm_acl/tunterm_acl.api_enum.h>
 #include <vpp_plugins/tunterm_acl/tunterm_acl.api_types.h>
 
+#include <vpp_plugins/sonic_ext/sonic_ext.api_enum.h>
+#include <vpp_plugins/sonic_ext/sonic_ext.api_types.h>
+
 #include <vlibmemory/vlib.api_types.h>
 #include <vlibmemory/memclnt.api_enum.h>
 
@@ -164,6 +167,24 @@
 
 #define vl_api_version(n, v) static u32 tunterm_api_version = v;
 #include <vpp_plugins/tunterm_acl/tunterm_acl.api.h>
+#undef vl_api_version
+
+/* sonic_ext API inclusion */
+
+#define vl_typedefs
+#include <vpp_plugins/sonic_ext/sonic_ext.api.h>
+#undef vl_typedefs
+
+#define  vl_endianfun
+#include <vpp_plugins/sonic_ext/sonic_ext.api.h>
+#undef vl_endianfun
+
+#define vl_calcsizefun
+#include <vpp_plugins/sonic_ext/sonic_ext.api.h>
+#undef vl_calcsizefun
+
+#define vl_api_version(n, v) static u32 sonic_ext_api_version = v;
+#include <vpp_plugins/sonic_ext/sonic_ext.api.h>
 #undef vl_api_version
 
 /* interface API inclusion */
@@ -1640,6 +1661,7 @@ static void vpp_base_vpe_init(void)
 static u16 ip_msg_id_base, ip_nbr_msg_id_base, lcp_msg_id_base;
 static u16 acl_msg_id_base;
 static u16 sflow_msg_id_base;
+static u16 sonic_ext_msg_id_base;
 
 static void vpp_ext_vpe_init(void)
 {
@@ -1739,6 +1761,13 @@ vl_api_acl_interface_add_del_reply_t_handler(vl_api_acl_interface_add_del_reply_
     set_reply_status(retval);
 }
 
+static void
+vl_api_sonic_ext_ip6_mfib_punt_enable_disable_reply_t_handler(vl_api_sonic_ext_ip6_mfib_punt_enable_disable_reply_t *msg)
+{
+    int retval = (int)ntohl((uint32_t)msg->retval);
+    set_reply_status(retval);
+}
+
 
 #define LCP_MSG_ID(id) \
     (VL_API_##id + lcp_msg_id_base)
@@ -1748,6 +1777,9 @@ vl_api_acl_interface_add_del_reply_t_handler(vl_api_acl_interface_add_del_reply_
 
 #define TUNTERM_MSG_ID(id) \
     (VL_API_##id + tunterm_msg_id_base)
+
+#define SONIC_EXT_MSG_ID(id) \
+    (VL_API_##id + sonic_ext_msg_id_base)
 
 #define VXLAN_MSG_ID(id) \
     (VL_API_##id + vxlan_msg_id_base)
@@ -1779,7 +1811,8 @@ vl_api_acl_interface_add_del_reply_t_handler(vl_api_acl_interface_add_del_reply_
     _(SFLOW_MSG_ID(SFLOW_ENABLE_DISABLE_REPLY), sflow_enable_disable_reply) \
     _(SFLOW_MSG_ID(SFLOW_SAMPLING_RATE_SET_REPLY), sflow_sampling_rate_set_reply) \
     _(IPIP_MSG_ID(IPIP_ADD_TUNNEL_REPLY), ipip_add_tunnel_reply) \
-    _(IPIP_MSG_ID(IPIP_DEL_TUNNEL_REPLY), ipip_del_tunnel_reply)
+    _(IPIP_MSG_ID(IPIP_DEL_TUNNEL_REPLY), ipip_del_tunnel_reply) \
+    _(SONIC_EXT_MSG_ID(SONIC_EXT_IP6_MFIB_PUNT_ENABLE_DISABLE_REPLY), sonic_ext_ip6_mfib_punt_enable_disable_reply)
 
 static void vpp_plugin_vpe_init(void)
 {
@@ -1851,6 +1884,11 @@ static void get_base_msg_id()
     msg_base_lookup_name = format (0, "tunterm_acl_%08x%c", tunterm_api_version, 0);
     tunterm_msg_id_base = vl_client_get_first_plugin_msg_id ((char *) msg_base_lookup_name);
     assert(tunterm_msg_id_base != (u16) ~0);
+
+    msg_base_lookup_name = format (0, "sonic_ext_%08x%c", sonic_ext_api_version, 0);
+    sonic_ext_msg_id_base = vl_client_get_first_plugin_msg_id ((char *) msg_base_lookup_name);
+    assert(sonic_ext_msg_id_base != (u16) ~0);
+
 
     msg_base_lookup_name = format (0, "classify_%08x%c", classify_api_version, 0);
     classify_msg_id_base = vl_client_get_first_plugin_msg_id ((char *) msg_base_lookup_name);
@@ -2717,18 +2755,31 @@ int ip_route_add_del (vpp_ip_route_t *prefix, bool is_add)
  * Accept path on each ip6-enabled wire interface and a local dpo-receive, but it
  * never forwards those packets to the lcp host tap. SAI hostif traps for IPv6 ND
  * / MLD are the SAI-level equivalent of that punt-to-host rule, so we install the
- * FORWARD path here. is_multipath=1 makes the path accumulate onto the existing
- * entry instead of replacing it.
+ * FORWARD path here.
+ *
+ * This used to go through the stock `ip_mroute_add_del` binary API, which
+ * VPP always attributes to MFIB_SOURCE_API. mfib forwarding is computed from
+ * the single best-priority source only (winner-take-all, not a merge across
+ * sources), and MFIB_SOURCE_API ranks below MFIB_SOURCE_SPECIAL -- the source
+ * VPP itself uses for the auto Accept/receive paths on these exact groups.
+ * The path was therefore present in the mfib RIB but silently shadowed out
+ * of the forwarding replicate (confirmed live: `show ip6 mfib` showed the
+ * Forward path under `src:API`, but the compiled replicate only ever
+ * contained `dpo-receive`). See sonic-vpp-egress-mfib-fix-plan.md.
+ *
+ * The fix routes this through a small custom VPP plugin message
+ * (sonic_ext_ip6_mfib_punt_enable_disable, in platform/vpp's sonic_ext
+ * plugin) that adds the path via mfib_table_entry_path_update() under
+ * MFIB_SOURCE_SPECIAL -- the same call VPP's own ip6_mfib_interface_enable_
+ * disable() uses for its per-interface Accept paths, so ours accumulates
+ * (multipath) into the same winning entry instead of losing to it.
  */
 int ip6_mfib_forward_add_del (uint32_t table_id, uint32_t host_sw_if_index,
                               const uint8_t grp_addr[16], uint8_t grp_prefix_len,
                               bool is_add)
 {
     vat_main_t *vam = &vat_main;
-    vl_api_ip_mroute_add_del_t *mp;
-    vl_api_ip_mroute_t *mroute;
-    vl_api_mfib_path_t *mfib_path;
-    vl_api_fib_path_t *fib_path;
+    vl_api_sonic_ext_ip6_mfib_punt_enable_disable_t *mp;
     int ret;
 
     if (host_sw_if_index == (u32) -1) {
@@ -2737,36 +2788,15 @@ int ip6_mfib_forward_add_del (uint32_t table_id, uint32_t host_sw_if_index,
 
     VPP_LOCK();
 
-    __plugin_msg_base = ip_msg_id_base;
+    __plugin_msg_base = sonic_ext_msg_id_base;
 
-    M22 (IP_MROUTE_ADD_DEL, mp, sizeof (vl_api_mfib_path_t));
-    mroute = &mp->route;
+    M (SONIC_EXT_IP6_MFIB_PUNT_ENABLE_DISABLE, mp);
 
-    mroute->table_id = htonl(table_id);
-    mroute->entry_flags = htonl(MFIB_API_ENTRY_FLAG_NONE);
-    mroute->rpf_id = htonl((uint32_t) ~0);
-    mroute->prefix.af = ADDRESS_IP6;
-    mroute->prefix.grp_address_length = htons((u16) grp_prefix_len);
-    memcpy(mroute->prefix.grp_address.ip6, grp_addr, sizeof(mroute->prefix.grp_address.ip6));
-    /* src_address stays zero: this is a (*,G) entry */
-    mroute->n_paths = 1;
-
-    mfib_path = &mroute->paths[0];
-    memset(mfib_path, 0, sizeof(*mfib_path));
-    mfib_path->itf_flags = htonl(MFIB_API_ITF_FLAG_FORWARD);
-
-    fib_path = &mfib_path->path;
-    fib_path->sw_if_index = htonl(host_sw_if_index);
-    fib_path->table_id = 0;
-    fib_path->rpf_id = htonl((uint32_t) ~0);
-    fib_path->weight = 1;
-    fib_path->preference = 0;
-    fib_path->proto = htonl(FIB_API_PATH_NH_PROTO_IP6);
-    fib_path->type = htonl(FIB_API_PATH_TYPE_NORMAL);
-    fib_path->n_labels = 0;
-
+    mp->table_id = htonl(table_id);
+    mp->punt_sw_if_index = htonl(host_sw_if_index);
+    memcpy(mp->grp_addr, grp_addr, sizeof(mp->grp_addr));
+    mp->grp_prefix_len = grp_prefix_len;
     mp->is_add = is_add;
-    mp->is_multipath = true;
 
     S (mp);
 
