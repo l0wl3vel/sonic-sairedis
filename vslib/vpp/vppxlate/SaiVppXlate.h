@@ -288,6 +288,14 @@ typedef enum {
     extern int init_vpp_client();
     extern int refresh_interfaces_list();
     extern int configure_lcp_interface(const char *hwif_name, const char *hostif_name, bool is_add);
+    /* Resolve the linux-cp host tap sw_if_index paired with a phy (wire) interface. */
+    extern int lcp_itf_pair_get_host_sw_if_index(const char *phy_hwif_name, uint32_t *host_sw_if_index);
+    /* Add/remove an IPv6 (*,G) mfib FORWARD path to a linux-cp host tap so that
+     * link-local multicast (IPv6 ND/MLD) accepted on the wire is also delivered to
+     * the SONiC kernel. grp_prefix_len selects a host (/128) vs range (/104) entry. */
+    extern int ip6_mfib_forward_add_del(uint32_t table_id, uint32_t host_sw_if_index,
+                                        const uint8_t grp_addr[16], uint8_t grp_prefix_len,
+                                        bool is_add);
     extern int create_loopback_instance(const char *hwif_name, uint32_t instance);
     extern int delete_loopback(const char *hwif_name, uint32_t instance);
     extern int get_sw_if_idx(const char *ifname);

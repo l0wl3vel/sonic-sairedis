@@ -14,6 +14,8 @@
 #include "vppxlate/SaiRouteStats.h"
 
 #include <list>
+#include <array>
+#include <utility>
 #include <map>
 #include <unordered_map>
 #include <mutex>
@@ -582,6 +584,12 @@ namespace saivs
             // no neighbor entries will be added to vpp from SAI
             bool nbr_active = true;
             std::map<std::string, std::string> m_intf_prefix_map;
+            // IPv6 link-local multicast hostif traps (ND/MLD) currently installed by
+            // orchagent. Tracked so mfib FORWARD paths to the lcp host taps can be
+            // (re)programmed when router interfaces are created or removed, regardless
+            // of whether the trap or the rif was created first. See
+            // SwitchVppHostifTrap.cpp.
+            std::set<int32_t> m_mcast_punt_trap_types;
             std::unordered_map<std::string, uint32_t> lpbInstMap;
             std::unordered_map<std::string, std::string> lpbIpToHostIfMap;
             std::unordered_map<std::string, std::string> lpbIpToIfMap;
@@ -631,6 +639,48 @@ namespace saivs
 
             sai_status_t removeRouterif(
                     _In_ sai_object_id_t objectId);
+
+        protected: // VPP hostif trap (IPv6 ND/MLD link-local multicast punt)
+
+            sai_status_t createHostifTrap(
+                    _In_ sai_object_id_t object_id,
+                    _In_ sai_object_id_t switch_id,
+                    _In_ uint32_t attr_count,
+                    _In_ const sai_attribute_t *attr_list);
+
+            sai_status_t removeHostifTrap(
+                    _In_ sai_object_id_t object_id);
+
+            // True if the trap type needs IPv6 link-local multicast delivered to the
+            // host tap, and (if so) fills the (group prefix, prefix length) entries.
+            static bool vpp_get_mcast_punt_prefixes(
+                    _In_ int32_t trap_type,
+                    _Out_ std::vector<std::pair<std::array<uint8_t, 16>, uint8_t>> &prefixes);
+
+            // Resolve a router interface to the lcp host tap sw_if_index and ip6 fib
+            // table its wire interface lives in. Returns false for rif types that have
+            // no wire-side lcp tap (loopback/vlan) or when the pair is not (yet) up.
+            bool vpp_get_rif_lcp_host(
+                    _In_ sai_object_id_t rif_oid,
+                    _Out_ uint32_t &host_sw_if_index,
+                    _Out_ uint32_t &table_id);
+
+            // Add/remove the mfib FORWARD paths for one trap type on one host tap.
+            sai_status_t vpp_mcast_punt_install(
+                    _In_ uint32_t host_sw_if_index,
+                    _In_ uint32_t table_id,
+                    _In_ int32_t trap_type,
+                    _In_ bool is_add);
+
+            // Program one trap type across every router interface.
+            sai_status_t vpp_mcast_punt_program_trap(
+                    _In_ int32_t trap_type,
+                    _In_ bool is_add);
+
+            // Program every installed trap type on a single router interface.
+            sai_status_t vpp_mcast_punt_program_rif(
+                    _In_ sai_object_id_t rif_oid,
+                    _In_ bool is_add);
 
             sai_status_t vpp_create_router_interface(
                     _In_ uint32_t attr_count,

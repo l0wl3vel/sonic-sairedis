@@ -1990,6 +1990,13 @@ sai_status_t SwitchVpp::createRouterif(
 
     CHECK_STATUS(create_internal(SAI_OBJECT_TYPE_ROUTER_INTERFACE, sid, switch_id, attr_count, attr_list));
 
+    // If IPv6 ND/MLD hostif traps already exist, this new router interface needs the
+    // matching mfib FORWARD paths to its lcp host tap (handles trap-before-rif order).
+    if (m_switchConfig->m_useTapDevice == true)
+    {
+        vpp_mcast_punt_program_rif(object_id, true);
+    }
+
     return SAI_STATUS_SUCCESS;
 }
 
@@ -1998,8 +2005,12 @@ sai_status_t SwitchVpp::removeRouterif(
 {
     SWSS_LOG_ENTER();
 
+    // Remove the mfib FORWARD paths first, while the router interface and its lcp
+    // pair are still resolvable.
     if (m_switchConfig->m_useTapDevice == true)
     {
+        vpp_mcast_punt_program_rif(objectId, false);
+
         vpp_remove_router_interface(objectId);
     }
 

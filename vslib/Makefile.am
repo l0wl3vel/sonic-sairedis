@@ -85,6 +85,7 @@ libSaiVS_a_SOURCES +=\
 					  vpp/SwitchVppRif.cpp \
 					  vpp/SwitchVppBfd.cpp \
 					  vpp/SwitchVppHostif.cpp \
+					  vpp/SwitchVppHostifTrap.cpp \
 					  vpp/SwitchVppRoute.cpp \
 					  vpp/SwitchVppNbr.cpp \
 					  vpp/SwitchVppSRv6.cpp \

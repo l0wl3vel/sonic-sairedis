@@ -1014,6 +1014,13 @@ static void
 vl_api_ip_route_add_del_reply_t_handler (vl_api_ip_route_add_del_reply_t *msg)
 {
     int retval = (int)ntohl((uint32_t)msg->retval);
+    set_reply_status(retval);
+}
+
+static void
+vl_api_ip_mroute_add_del_reply_t_handler (vl_api_ip_mroute_add_del_reply_t *msg)
+{
+    int retval = (int)ntohl((uint32_t)msg->retval);
 
     if (msg->context) {
         uint32_t *stats_index = (uint32_t *) get_index_ptr(msg->context);
@@ -1594,6 +1601,7 @@ static void vpp_base_vpe_init(void)
     _(INTERFACE_MSG_ID(SW_INTERFACE_EVENT), sw_interface_event) \
     _(IP_MSG_ID(IP_TABLE_ADD_DEL_REPLY), ip_table_add_del_reply) \
     _(IP_MSG_ID(IP_ROUTE_ADD_DEL_REPLY), ip_route_add_del_reply) \
+    _(IP_MSG_ID(IP_MROUTE_ADD_DEL_REPLY), ip_mroute_add_del_reply) \
     _(IP_MSG_ID(SW_INTERFACE_IP6_ENABLE_DISABLE_REPLY), sw_interface_ip6_enable_disable_reply) \
     _(IP_MSG_ID(SET_IP_FLOW_HASH_V2_REPLY), set_ip_flow_hash_v2_reply)        \
     _(IP_MSG_ID(IP_ADDRESS_DETAILS), ip_address_details) \
@@ -1662,6 +1670,41 @@ static void vl_api_lcp_ethertype_enable_reply_t_handler(vl_api_lcp_ethertype_ena
     set_reply_status(retval);
 }
 
+/*
+ * Used by lcp_itf_pair_get_host_sw_if_index() to resolve the linux-cp host tap
+ * sw_if_index that is paired with a given phy sw_if_index. The dump is filtered
+ * client side in the details handler below.
+ */
+typedef struct lcp_itf_pair_query_ {
+    uint32_t phy_sw_if_index;   /* in:  phy interface to match  */
+    uint32_t host_sw_if_index;  /* out: paired host tap         */
+    bool found;
+} lcp_itf_pair_query_t;
+
+static void vl_api_lcp_itf_pair_details_t_handler(vl_api_lcp_itf_pair_details_t *mp)
+{
+    if (!mp->context) {
+        return;
+    }
+
+    lcp_itf_pair_query_t *query = (lcp_itf_pair_query_t *) get_index_ptr(mp->context);
+
+    if (query == NULL || query->found) {
+        return;
+    }
+
+    if (ntohl(mp->phy_sw_if_index) == query->phy_sw_if_index) {
+        query->host_sw_if_index = ntohl(mp->host_sw_if_index);
+        query->found = true;
+    }
+}
+
+static void vl_api_lcp_itf_pair_get_reply_t_handler(vl_api_lcp_itf_pair_get_reply_t *msg)
+{
+    int retval = (int)ntohl((uint32_t)msg->retval);
+    set_reply_status(retval);
+}
+
 static void vl_api_acl_add_replace_reply_t_handler(vl_api_acl_add_replace_reply_t *msg)
 {
     int retval = (int)ntohl((uint32_t)msg->retval);
@@ -1717,6 +1760,8 @@ vl_api_acl_interface_add_del_reply_t_handler(vl_api_acl_interface_add_del_reply_
 
 #define foreach_vpe_plugin_api_reply_msg                                \
     _(LCP_MSG_ID(LCP_ITF_PAIR_ADD_DEL_REPLY), lcp_itf_pair_add_del_reply) \
+    _(LCP_MSG_ID(LCP_ITF_PAIR_GET_REPLY), lcp_itf_pair_get_reply) \
+    _(LCP_MSG_ID(LCP_ITF_PAIR_DETAILS), lcp_itf_pair_details) \
     _(LCP_MSG_ID(LCP_ETHERTYPE_ENABLE_REPLY), lcp_ethertype_enable_reply) \
     _(ACL_MSG_ID(ACL_ADD_REPLACE_REPLY), acl_add_replace_reply)        \
     _(ACL_MSG_ID(ACL_DEL_REPLY), acl_del_reply) \
@@ -2230,6 +2275,55 @@ int configure_lcp_interface (const char *hwif_name, const char *hostif_name, boo
     return config_lcp_hostif(vam, idx, hostif_name, is_add);
 }
 
+int lcp_itf_pair_get_host_sw_if_index (const char *phy_hwif_name, uint32_t *host_sw_if_index)
+{
+    vat_main_t *vam = &vat_main;
+    vl_api_lcp_itf_pair_get_t *mp;
+    lcp_itf_pair_query_t query;
+    u32 phy_sw_if_index;
+    int ret;
+
+    phy_sw_if_index = get_swif_idx(vam, phy_hwif_name);
+    if (phy_sw_if_index == (u32) -1) {
+        SAIVPP_ERROR("%s unable to get sw_index for %s", __func__, phy_hwif_name);
+        return -EINVAL;
+    }
+
+    query.phy_sw_if_index = phy_sw_if_index;
+    query.host_sw_if_index = (u32) -1;
+    query.found = false;
+
+    VPP_LOCK();
+
+    __plugin_msg_base = lcp_msg_id_base;
+
+    M (LCP_ITF_PAIR_GET, mp);
+    mp->cursor = htonl(0);
+    mp->context = store_ptr(&query);
+
+    S (mp);
+
+    /* lcp_itf_pair_get streams all lcp_itf_pair_details and then its own
+     * lcp_itf_pair_get_reply, which terminates WR(); the details (processed by
+     * vl_api_lcp_itf_pair_details_t_handler) have all arrived by then. No separate
+     * control ping is needed, and adding one would leave a stray reply behind. */
+    WR (ret);
+
+    VPP_UNLOCK();
+
+    if (ret == 0 && query.found) {
+        *host_sw_if_index = query.host_sw_if_index;
+        SAIVPP_INFO("%s %s (phy_sw_if_index %u) -> host_sw_if_index %u", __func__,
+                    phy_hwif_name, phy_sw_if_index, query.host_sw_if_index);
+        return 0;
+    }
+
+    SAIVPP_ERROR("%s no lcp pair for %s (phy_sw_if_index %u, ret %d, found %d)", __func__,
+                 phy_hwif_name, phy_sw_if_index, ret, query.found);
+
+    return ret ? ret : -ENOENT;
+}
+
 int create_loopback_instance (const char *hwif_name, u32 instance)
 {
     vat_main_t *vam = &vat_main;
@@ -2614,6 +2708,78 @@ int ip_route_add_del_get_stats (vpp_ip_route_t *prefix, bool is_add, uint32_t *s
 int ip_route_add_del (vpp_ip_route_t *prefix, bool is_add)
 {
     return ip_route_add_del_get_stats(prefix, is_add, NULL);
+}
+
+/*
+ * Add or remove an IPv6 (*,G) mfib FORWARD path pointing at a linux-cp host tap.
+ *
+ * VPP auto-creates the link-local multicast (*,G) entries (ff02::/16) with an
+ * Accept path on each ip6-enabled wire interface and a local dpo-receive, but it
+ * never forwards those packets to the lcp host tap. SAI hostif traps for IPv6 ND
+ * / MLD are the SAI-level equivalent of that punt-to-host rule, so we install the
+ * FORWARD path here. is_multipath=1 makes the path accumulate onto the existing
+ * entry instead of replacing it.
+ */
+int ip6_mfib_forward_add_del (uint32_t table_id, uint32_t host_sw_if_index,
+                              const uint8_t grp_addr[16], uint8_t grp_prefix_len,
+                              bool is_add)
+{
+    vat_main_t *vam = &vat_main;
+    vl_api_ip_mroute_add_del_t *mp;
+    vl_api_ip_mroute_t *mroute;
+    vl_api_mfib_path_t *mfib_path;
+    vl_api_fib_path_t *fib_path;
+    int ret;
+
+    if (host_sw_if_index == (u32) -1) {
+        return -EINVAL;
+    }
+
+    VPP_LOCK();
+
+    __plugin_msg_base = ip_msg_id_base;
+
+    M22 (IP_MROUTE_ADD_DEL, mp, sizeof (vl_api_mfib_path_t));
+    mroute = &mp->route;
+
+    mroute->table_id = htonl(table_id);
+    mroute->entry_flags = htonl(MFIB_API_ENTRY_FLAG_NONE);
+    mroute->rpf_id = htonl((uint32_t) ~0);
+    mroute->prefix.af = ADDRESS_IP6;
+    mroute->prefix.grp_address_length = htons((u16) grp_prefix_len);
+    memcpy(mroute->prefix.grp_address.ip6, grp_addr, sizeof(mroute->prefix.grp_address.ip6));
+    /* src_address stays zero: this is a (*,G) entry */
+    mroute->n_paths = 1;
+
+    mfib_path = &mroute->paths[0];
+    memset(mfib_path, 0, sizeof(*mfib_path));
+    mfib_path->itf_flags = htonl(MFIB_API_ITF_FLAG_FORWARD);
+
+    fib_path = &mfib_path->path;
+    fib_path->sw_if_index = htonl(host_sw_if_index);
+    fib_path->table_id = 0;
+    fib_path->rpf_id = htonl((uint32_t) ~0);
+    fib_path->weight = 1;
+    fib_path->preference = 0;
+    fib_path->proto = htonl(FIB_API_PATH_NH_PROTO_IP6);
+    fib_path->type = htonl(FIB_API_PATH_TYPE_NORMAL);
+    fib_path->n_labels = 0;
+
+    mp->is_add = is_add;
+    mp->is_multipath = true;
+
+    S (mp);
+
+    WR (ret);
+
+    ret = vpp_normalize_ret(ret, !is_add, __func__);
+
+    if (ret) { SAIVPP_ERROR("%s failed(%d) table %u host_sw_if_index %u plen %u is_add %d", __func__, ret, table_id, host_sw_if_index, grp_prefix_len, is_add); }
+    else { SAIVPP_INFO("%s table %u host_sw_if_index %u plen %u is_add %d", __func__, table_id, host_sw_if_index, grp_prefix_len, is_add); }
+
+    VPP_UNLOCK();
+
+    return ret;
 }
 
 static unsigned int ipv4_mask_len (uint32_t mask)

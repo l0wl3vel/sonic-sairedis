@@ -1324,6 +1324,13 @@ sai_status_t SwitchVpp::create(
         return createHostif(object_id, switch_id, attr_count, attr_list);
     }
 
+    if (object_type == SAI_OBJECT_TYPE_HOSTIF_TRAP)
+    {
+        sai_object_id_t object_id;
+        sai_deserialize_object_id(serializedObjectId, object_id);
+        return createHostifTrap(object_id, switch_id, attr_count, attr_list);
+    }
+
     if (object_type == SAI_OBJECT_TYPE_ROUTER_INTERFACE)
     {
         sai_object_id_t object_id;
@@ -1677,6 +1684,13 @@ sai_status_t SwitchVpp::remove(
         sai_object_id_t objectId;
         sai_deserialize_object_id(serializedObjectId, objectId);
         return removeHostif(objectId);
+    }
+
+    if (object_type == SAI_OBJECT_TYPE_HOSTIF_TRAP)
+    {
+        sai_object_id_t objectId;
+        sai_deserialize_object_id(serializedObjectId, objectId);
+        return removeHostifTrap(objectId);
     }
 
     if (object_type == SAI_OBJECT_TYPE_ROUTER_INTERFACE)
