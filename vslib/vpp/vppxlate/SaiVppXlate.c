@@ -41,6 +41,9 @@
 #include <vnet/ip/ip.api_enum.h>
 #include <vnet/ip/ip.api_types.h>
 
+#include <vnet/ip6-nd/ip6_nd.api_enum.h>
+#include <vnet/ip6-nd/ip6_nd.api_types.h>
+
 #include <vnet/ip-neighbor/ip_neighbor.api_enum.h>
 #include <vnet/ip-neighbor/ip_neighbor.api_types.h>
 
@@ -253,6 +256,31 @@
 
 #define vl_api_version(n, v) static u32 ip_api_version = v;
 #include <vnet/ip/ip.api.h>
+#undef vl_api_version
+
+/* ip6-nd API inclusion (sw_interface_ip6nd_ra_config) */
+
+#define vl_typedefs
+#include <vnet/ip6-nd/ip6_nd.api.h>
+#undef vl_typedefs
+
+#define  vl_endianfun
+#include <vnet/ip6-nd/ip6_nd.api.h>
+#undef vl_endianfun
+
+
+#define vl_print(handle, ...)        vlib_cli_output (handle, __VA_ARGS__)
+#define vl_printfun
+#include <vnet/ip6-nd/ip6_nd.api.h>
+
+#undef vl_printfun
+
+#define vl_calcsizefun
+#include <vnet/ip6-nd/ip6_nd.api.h>
+#undef vl_calcsizefun
+
+#define vl_api_version(n, v) static u32 ip6_nd_api_version = v;
+#include <vnet/ip6-nd/ip6_nd.api.h>
 #undef vl_api_version
 
 /* ip neighbor API inclusion */
@@ -1067,6 +1095,14 @@ vl_api_sw_interface_ip6_enable_disable_reply_t_handler(
 }
 
 static void
+vl_api_sw_interface_ip6nd_ra_config_reply_t_handler(
+    vl_api_sw_interface_ip6nd_ra_config_reply_t *msg)
+{
+    int retval = (int)ntohl((uint32_t)msg->retval);
+    set_reply_status(retval);
+}
+
+static void
 vl_api_set_ip_flow_hash_v2_reply_t_handler (vl_api_ip_route_add_del_reply_t *msg)
 {
     int retval = (int)ntohl((uint32_t)msg->retval);
@@ -1586,6 +1622,9 @@ static void vpp_base_vpe_init(void)
 #define IP_NBR_MSG_ID(id) \
     (VL_API_##id + ip_nbr_msg_id_base)
 
+#define IP6_ND_MSG_ID(id) \
+    (VL_API_##id + ip6_nd_msg_id_base)
+
 #define L2_MSG_ID(id) \
     (VL_API_##id + l2_msg_id_base)
 
@@ -1655,10 +1694,11 @@ static void vpp_base_vpe_init(void)
     _(CLASSIFY_MSG_ID(CLASSIFY_ADD_DEL_SESSION_REPLY), classify_add_del_session_reply) \
     _(CLASSIFY_MSG_ID(CLASSIFY_SET_INTERFACE_L2_TABLES_REPLY), classify_set_interface_l2_tables_reply) \
     _(VLIB_API_MSG_ID(GET_NEXT_INDEX_REPLY), get_next_index_reply) \
-    _(VLIB_API_MSG_ID(ADD_NODE_NEXT_REPLY), add_node_next_reply)
+    _(VLIB_API_MSG_ID(ADD_NODE_NEXT_REPLY), add_node_next_reply) \
+    _(IP6_ND_MSG_ID(SW_INTERFACE_IP6ND_RA_CONFIG_REPLY), sw_interface_ip6nd_ra_config_reply)
 
 
-static u16 ip_msg_id_base, ip_nbr_msg_id_base, lcp_msg_id_base;
+static u16 ip_msg_id_base, ip_nbr_msg_id_base, lcp_msg_id_base, ip6_nd_msg_id_base;
 static u16 acl_msg_id_base;
 static u16 sflow_msg_id_base;
 static u16 sonic_ext_msg_id_base;
@@ -1844,6 +1884,10 @@ static void get_base_msg_id()
     msg_base_lookup_name = format (0, "ip_neighbor_%08x%c", ip_neighbor_api_version, 0);
     ip_nbr_msg_id_base = vl_client_get_first_plugin_msg_id ((char *) msg_base_lookup_name);
     assert(ip_nbr_msg_id_base != (u16) ~0);
+
+    msg_base_lookup_name = format (0, "ip6_nd_%08x%c", ip6_nd_api_version, 0);
+    ip6_nd_msg_id_base = vl_client_get_first_plugin_msg_id ((char *) msg_base_lookup_name);
+    assert(ip6_nd_msg_id_base != (u16) ~0);
 
     msg_base_lookup_name = format (0, "lcp_%08x%c", lcp_api_version, 0);
     lcp_msg_id_base = vl_client_get_first_plugin_msg_id ((char *) msg_base_lookup_name);
@@ -3792,6 +3836,56 @@ int sw_interface_ip6_enable_disable(const char *hwif_name, bool enable)
 
     if (ret) { SAIVPP_ERROR("%s failed(%d) %s enable %d", __func__, ret, hwif_name, enable); }
     else { SAIVPP_INFO("%s %s enable %d", __func__, hwif_name, enable); }
+
+    VPP_UNLOCK();
+
+    return ret;
+}
+
+/*
+ * Stop a phy from being selected as the unnumbered-BGP ND/RA discovery
+ * target: suppress its own periodic/solicited RAs and, when it must
+ * still answer, advertise router lifetime 0 ("not a default router").
+ * The phy keeps its link-local for NS/NA nexthop resolution -- this
+ * only affects RA content, not ND itself. See vpp_create_router_interface().
+ */
+int vpp_ip6_nd_ra_config(const char *hwif_name, bool suppress, uint32_t lifetime)
+{
+    vat_main_t *vam = &vat_main;
+    vl_api_sw_interface_ip6nd_ra_config_t *mp;
+    int ret;
+
+    VPP_LOCK();
+
+    __plugin_msg_base = ip6_nd_msg_id_base;
+
+    M (SW_INTERFACE_IP6ND_RA_CONFIG, mp);
+    if (hwif_name) {
+        u32 idx;
+
+        idx = get_swif_idx(vam, hwif_name);
+        if (idx != (u32) -1) {
+            mp->sw_if_index = htonl(idx);
+        } else {
+            SAIVPP_ERROR("Unable to get sw_index for %s\n", hwif_name);
+            VPP_UNLOCK();
+            return -EINVAL;
+        }
+    } else {
+        VPP_UNLOCK();
+        return -EINVAL;
+    }
+
+    mp->suppress = suppress ? 1 : 0;
+    mp->default_router = 0;
+    mp->lifetime = htonl(lifetime);
+
+    S (mp);
+
+    WR (ret);
+
+    if (ret) { SAIVPP_ERROR("%s failed(%d) %s suppress %d lifetime %u", __func__, ret, hwif_name, suppress, lifetime); }
+    else { SAIVPP_INFO("%s %s suppress %d lifetime %u", __func__, hwif_name, suppress, lifetime); }
 
     VPP_UNLOCK();
 

@@ -1599,6 +1599,7 @@ sai_status_t SwitchVpp::vpp_create_router_interface(
     const char *dev = if_name.c_str();
     const char *linux_ifname;
     char host_subifname[32];
+    std::string rif_hwif_name;
 
     if (attr_type->value.s32 == SAI_ROUTER_INTERFACE_TYPE_SUB_PORT)
     {
@@ -1630,8 +1631,12 @@ sai_status_t SwitchVpp::vpp_create_router_interface(
         refresh_interfaces_list();
 
         linux_ifname = host_subifname;
+        rif_hwif_name = vpp_subif_name;
     } else {
         linux_ifname = dev;
+        rif_hwif_name = (ot == SAI_OBJECT_TYPE_LAG)
+            ? (std::string(BONDETHERNET_PREFIX) + std::to_string(bond_info.id))
+            : std::string(tap_to_hwif_name(dev));
     }
 
     sai_object_id_t vrf_obj_id = 0;
@@ -1663,6 +1668,22 @@ sai_status_t SwitchVpp::vpp_create_router_interface(
 	SWSS_LOG_NOTICE("Setting interface vrf on hwif_name %s", hwif_name);
 	set_interface_vrf(hwif_name, vlan_id, vrf_id, false);
     }
+
+    /*
+     * Part 2 of the link-local IPv6 multicast fix for unnumbered BGP
+     * (sonic-vpp-mcast-inject-implementation-handoff.md): a routed phy
+     * gets its own link-local address and answers ND, which lets a
+     * peer select it -- instead of the FRR-owned tap relayed by
+     * sonic-ext-mcast6-host -- as the unnumbered-BGP discovery target.
+     * Keep the phy's link-local (dataplane NS/NA nexthop resolution
+     * still needs it) but suppress its own RAs and zero the advertised
+     * router lifetime, so any peer prefers FRR's RA instead.
+     */
+    if (vpp_ip6_nd_ra_config(rif_hwif_name.c_str(), true, 0) < 0)
+    {
+        SWSS_LOG_ERROR("failed to suppress RA / zero router lifetime on %s", rif_hwif_name.c_str());
+    }
+
     auto attr_type_mtu = sai_metadata_get_attr_by_id(SAI_ROUTER_INTERFACE_ATTR_MTU, attr_count, attr_list);
 
     if (attr_type_mtu != NULL)

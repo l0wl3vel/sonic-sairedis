@@ -181,26 +181,29 @@ sai_status_t SwitchVpp::vpp_mcast_punt_install(
 {
     SWSS_LOG_ENTER();
 
-    std::vector<std::pair<std::array<uint8_t, 16>, uint8_t>> prefixes;
-    if (vpp_get_mcast_punt_prefixes(trap_type, prefixes) == false)
-    {
-        return SAI_STATUS_SUCCESS;
-    }
+    /*
+     * Superseded (Option A of sonic-vpp-mcast-inject-implementation-handoff.md):
+     * link-local ND/MLD punt to the lcp host tap, and the tap->wire inject
+     * these traps were never able to provide, are now handled entirely in
+     * the VPP dataplane by the sonic_ext plugin's per-lcp-pair
+     * sonic-ext-mcast6-{phy,host} feature (see mcast6_node.c), wired up
+     * automatically the moment a linux-cp pair is created -- no hostif
+     * trap or per-VRF mfib entry required.
+     *
+     * A global (*,G) mfib Forward path programmed here would now just be
+     * a second, redundant delivery path (duplicate RAs reaching FRR) with
+     * the cross-leak exposure this handoff explicitly moved away from
+     * (a single table_id entry floods to every port sharing that VRF).
+     * Left as a no-op rather than deleted so the hostif-trap/RIF
+     * bookkeeping above (m_mcast_punt_trap_types, vpp_get_rif_lcp_host)
+     * keeps working unchanged if this ever needs to be revisited.
+     */
+    (void) host_sw_if_index;
+    (void) table_id;
+    (void) trap_type;
+    (void) is_add;
 
-    sai_status_t status = SAI_STATUS_SUCCESS;
-    for (const auto &p : prefixes)
-    {
-        int ret = ip6_mfib_forward_add_del(table_id, host_sw_if_index,
-                p.first.data(), p.second, is_add);
-        if (ret != 0)
-        {
-            SWSS_LOG_ERROR("ip6_mfib_forward_add_del failed(%d) host_sw_if_index %u table %u plen %u is_add %d",
-                    ret, host_sw_if_index, table_id, p.second, is_add);
-            status = SAI_STATUS_FAILURE;
-        }
-    }
-
-    return status;
+    return SAI_STATUS_SUCCESS;
 }
 
 sai_status_t SwitchVpp::vpp_mcast_punt_program_trap(
