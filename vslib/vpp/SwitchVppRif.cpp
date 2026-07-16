@@ -393,6 +393,49 @@ bool SwitchVpp::vpp_resolve_rif_hwif_name (
 
     sai_attribute_t attr;
 
+    attr.id = SAI_ROUTER_INTERFACE_ATTR_TYPE;
+    if (get(SAI_OBJECT_TYPE_ROUTER_INTERFACE, rif_id, 1, &attr) != SAI_STATUS_SUCCESS)
+    {
+        return false;
+    }
+    int32_t rif_type = attr.value.s32;
+
+    if (rif_type == SAI_ROUTER_INTERFACE_TYPE_VLAN)
+    {
+        /*
+         * VLAN RIFs don't carry PORT_ID; they resolve to the VLAN's BVI
+         * interface ("bvi<vlan_id>"), following the same RIF-VLAN_ID ->
+         * VLAN-VLAN_ID lookup used by vpp_delete_bvi_interface.
+         */
+        attr.id = SAI_ROUTER_INTERFACE_ATTR_VLAN_ID;
+        if (get(SAI_OBJECT_TYPE_ROUTER_INTERFACE, rif_id, 1, &attr) != SAI_STATUS_SUCCESS)
+        {
+            return false;
+        }
+        sai_object_id_t vlan_oid = attr.value.oid;
+        if (objectTypeQuery(vlan_oid) != SAI_OBJECT_TYPE_VLAN)
+        {
+            return false;
+        }
+
+        attr.id = SAI_VLAN_ATTR_VLAN_ID;
+        if (get(SAI_OBJECT_TYPE_VLAN, vlan_oid, 1, &attr) != SAI_STATUS_SUCCESS)
+        {
+            return false;
+        }
+
+        char hw_bviifname[32];
+        snprintf(hw_bviifname, sizeof(hw_bviifname), "bvi%u", attr.value.u16);
+        hwif_name = std::string(hw_bviifname);
+        return true;
+    }
+
+    if (rif_type != SAI_ROUTER_INTERFACE_TYPE_SUB_PORT &&
+        rif_type != SAI_ROUTER_INTERFACE_TYPE_PORT)
+    {
+        return false;
+    }
+
     attr.id = SAI_ROUTER_INTERFACE_ATTR_PORT_ID;
     if (get(SAI_OBJECT_TYPE_ROUTER_INTERFACE, rif_id, 1, &attr) != SAI_STATUS_SUCCESS)
     {
@@ -406,19 +449,8 @@ bool SwitchVpp::vpp_resolve_rif_hwif_name (
     }
     auto port_oid = attr.value.oid;
 
-    attr.id = SAI_ROUTER_INTERFACE_ATTR_TYPE;
-    if (get(SAI_OBJECT_TYPE_ROUTER_INTERFACE, rif_id, 1, &attr) != SAI_STATUS_SUCCESS)
-    {
-        return false;
-    }
-    if (attr.value.s32 != SAI_ROUTER_INTERFACE_TYPE_SUB_PORT &&
-        attr.value.s32 != SAI_ROUTER_INTERFACE_TYPE_PORT)
-    {
-        return false;
-    }
-
     uint16_t vlan_id = 0;
-    if (attr.value.s32 == SAI_ROUTER_INTERFACE_TYPE_SUB_PORT)
+    if (rif_type == SAI_ROUTER_INTERFACE_TYPE_SUB_PORT)
     {
         attr.id = SAI_ROUTER_INTERFACE_ATTR_OUTER_VLAN_ID;
         if (get(SAI_OBJECT_TYPE_ROUTER_INTERFACE, rif_id, 1, &attr) != SAI_STATUS_SUCCESS)
@@ -569,6 +601,38 @@ sai_status_t SwitchVpp::vpp_set_interface_state (
         interface_set_state(hwif_name, is_up);
         SWSS_LOG_NOTICE("Updating router interface admin state %s %s", hwif_name,
                         (is_up ? "UP" : "DOWN"));
+    }
+    return SAI_STATUS_SUCCESS;
+}
+
+sai_status_t SwitchVpp::vpp_set_interface_ip_enable (
+        _In_ sai_object_id_t object_id,
+        _In_ uint32_t vlan_id,
+        _In_ bool v4_enable)
+{
+    SWSS_LOG_ENTER();
+
+    /*
+     * v4 only: IPv6 is already enabled unconditionally when the hostif/tap is
+     * created (SwitchVppHostif.cpp, sw_interface_ip6_enable_disable(..., true)),
+     * driven by link-local address assignment. Re-toggling it here based on
+     * ADMIN_V6_STATE risks disabling v6 on interfaces that rely on that
+     * implicit enable (e.g. the BGP-unnumbered fabric port), so leave v6 alone.
+     */
+    if (is_ip_nbr_active() == false) {
+        return SAI_STATUS_SUCCESS;
+    }
+
+    std::string ifname;
+
+    if (vpp_get_hwif_name(object_id, vlan_id, ifname) == true) {
+        const char *hwif_name = ifname.c_str();
+
+        if (sw_interface_ip4_enable_disable(hwif_name, v4_enable) < 0)
+        {
+            SWSS_LOG_ERROR("failed to %s ipv4 for %s", (v4_enable ? "enable" : "disable"), hwif_name);
+        }
+        SWSS_LOG_NOTICE("Updating router interface ip4 enable %s -> %d", hwif_name, v4_enable);
     }
     return SAI_STATUS_SUCCESS;
 }
@@ -1737,27 +1801,22 @@ sai_status_t SwitchVpp::vpp_create_router_interface(
         vpp_set_interface_mtu(obj_id, vlan_id, attr_type_mtu->value.u32);
     }
 
-    bool v4_is_up = false, v6_is_up = false;
-
+    /*
+     * SAI_ROUTER_INTERFACE_ATTR_ADMIN_V4_STATE defaults to true per the SAI spec
+     * (sairouterinterface.h) when not passed on create -- orchagent typically
+     * omits it, so apply that default here rather than treating "absent" as
+     * "leave disabled". See sonic-vpp-rif-v4-and-vlan-neighbor-handoff.md bug 2:
+     * without this, IPv4 is never enabled on interfaces that never get an
+     * address (e.g. a BGP-unnumbered fabric port), and inbound v4 is dropped at
+     * ip4-not-enabled even though the FIB and SAI state are correct.
+     */
     auto attr_type_v4 = sai_metadata_get_attr_by_id(SAI_ROUTER_INTERFACE_ATTR_ADMIN_V4_STATE, attr_count, attr_list);
 
-    if (attr_type_v4 != NULL)
-    {
-        v4_is_up = attr_type_v4->value.booldata;
-    }
-    auto attr_type_v6 = sai_metadata_get_attr_by_id(SAI_ROUTER_INTERFACE_ATTR_ADMIN_V6_STATE, attr_count, attr_list);
+    bool v4_is_up = (attr_type_v4 != NULL) ? attr_type_v4->value.booldata : true;
 
-    if (attr_type_v6 != NULL)
-    {
-        v6_is_up = attr_type_v6->value.booldata;
-    }
+    vpp_set_interface_ip_enable(obj_id, vlan_id, v4_is_up);
 
-    if (attr_type_v4 != NULL || attr_type_v6 != NULL)
-    {
-        return vpp_set_interface_state(obj_id, vlan_id, (v4_is_up || v6_is_up));
-    } else {
-        return SAI_STATUS_SUCCESS;
-    }
+    return SAI_STATUS_SUCCESS;
 }
 
 sai_status_t SwitchVpp::vpp_update_router_interface(
@@ -1834,27 +1893,18 @@ sai_status_t SwitchVpp::vpp_update_router_interface(
         vpp_set_interface_mtu(obj_id, vlan_id, attr_type_mtu->value.u32);
     }
 
-    bool v4_is_up = false, v6_is_up = false;
-
+    /*
+     * SET semantics: only touch what's explicitly passed, unlike create where
+     * an absent ADMIN_V4_STATE means "apply the SAI default".
+     */
     auto attr_type_v4 = sai_metadata_get_attr_by_id(SAI_ROUTER_INTERFACE_ATTR_ADMIN_V4_STATE, attr_count, attr_list);
 
     if (attr_type_v4 != NULL)
     {
-        v4_is_up = attr_type_v4->value.booldata;
-    }
-    auto attr_type_v6 = sai_metadata_get_attr_by_id(SAI_ROUTER_INTERFACE_ATTR_ADMIN_V6_STATE, attr_count, attr_list);
-
-    if (attr_type_v6 != NULL)
-    {
-        v6_is_up = attr_type_v6->value.booldata;
+        vpp_set_interface_ip_enable(obj_id, vlan_id, attr_type_v4->value.booldata);
     }
 
-    if (attr_type_v4 != NULL || attr_type_v6 != NULL)
-    {
-        return vpp_set_interface_state(obj_id, vlan_id, (v4_is_up || v6_is_up));
-    } else {
-        return SAI_STATUS_SUCCESS;
-    }
+    return SAI_STATUS_SUCCESS;
 }
 
 sai_status_t SwitchVpp::vpp_router_interface_remove_vrf(
@@ -1967,6 +2017,14 @@ sai_status_t SwitchVpp::vpp_remove_router_interface(sai_object_id_t rif_id)
 
     if (rif_type != SAI_ROUTER_INTERFACE_TYPE_SUB_PORT)
     {
+        /*
+         * Symmetric with vpp_create_router_interface enabling IPv4 by default:
+         * a port leaving L3 (RIF removed, VRF reset below) must not keep
+         * accepting IPv4 if it's later moved into an L2 bridge -- otherwise it
+         * silently keeps routing traffic outside of SAI/CONFIG_DB's view.
+         */
+        vpp_set_interface_ip_enable(obj_id, 0, false);
+
         vpp_router_interface_remove_vrf(obj_id);
 
         return SAI_STATUS_SUCCESS;

@@ -1095,6 +1095,14 @@ vl_api_sw_interface_ip6_enable_disable_reply_t_handler(
 }
 
 static void
+vl_api_sw_interface_ip4_enable_disable_reply_t_handler(
+    vl_api_sw_interface_ip4_enable_disable_reply_t *msg)
+{
+    int retval = (int)ntohl((uint32_t)msg->retval);
+    set_reply_status(retval);
+}
+
+static void
 vl_api_sw_interface_ip6nd_ra_config_reply_t_handler(
     vl_api_sw_interface_ip6nd_ra_config_reply_t *msg)
 {
@@ -1663,6 +1671,7 @@ static void vpp_base_vpe_init(void)
     _(IP_MSG_ID(IP_ROUTE_ADD_DEL_REPLY), ip_route_add_del_reply) \
     _(IP_MSG_ID(IP_MROUTE_ADD_DEL_REPLY), ip_mroute_add_del_reply) \
     _(IP_MSG_ID(SW_INTERFACE_IP6_ENABLE_DISABLE_REPLY), sw_interface_ip6_enable_disable_reply) \
+    _(IP_MSG_ID(SW_INTERFACE_IP4_ENABLE_DISABLE_REPLY), sw_interface_ip4_enable_disable_reply) \
     _(IP_MSG_ID(SET_IP_FLOW_HASH_V2_REPLY), set_ip_flow_hash_v2_reply)        \
     _(IP_MSG_ID(IP_ADDRESS_DETAILS), ip_address_details) \
     _(IP_NBR_MSG_ID(IP_NEIGHBOR_ADD_DEL_REPLY), ip_neighbor_add_del_reply) \
@@ -3813,6 +3822,46 @@ int sw_interface_ip6_enable_disable(const char *hwif_name, bool enable)
     __plugin_msg_base = ip_msg_id_base;
 
     M (SW_INTERFACE_IP6_ENABLE_DISABLE, mp);
+    if (hwif_name) {
+        u32 idx;
+
+        idx = get_swif_idx(vam, hwif_name);
+        if (idx != (u32) -1) {
+            mp->sw_if_index = htonl(idx);
+        } else {
+            SAIVPP_ERROR("Unable to get sw_index for %s\n", hwif_name);
+            VPP_UNLOCK();
+            return -EINVAL;
+        }
+    } else {
+        VPP_UNLOCK();
+        return -EINVAL;
+    }
+    mp->enable = enable;
+
+    S (mp);
+
+    WR (ret);
+
+    if (ret) { SAIVPP_ERROR("%s failed(%d) %s enable %d", __func__, ret, hwif_name, enable); }
+    else { SAIVPP_INFO("%s %s enable %d", __func__, hwif_name, enable); }
+
+    VPP_UNLOCK();
+
+    return ret;
+}
+
+int sw_interface_ip4_enable_disable(const char *hwif_name, bool enable)
+{
+    vat_main_t *vam = &vat_main;
+    vl_api_sw_interface_ip4_enable_disable_t *mp;
+    int ret;
+
+    VPP_LOCK();
+
+    __plugin_msg_base = ip_msg_id_base;
+
+    M (SW_INTERFACE_IP4_ENABLE_DISABLE, mp);
     if (hwif_name) {
         u32 idx;
 

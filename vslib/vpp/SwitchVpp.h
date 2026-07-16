@@ -748,6 +748,13 @@ namespace saivs
                     _In_ sai_object_id_t object_id,
                     _In_ uint32_t vlan_id,
                     _In_ bool is_up);
+            // enable/disable IP4/IP6 protocol processing on a router interface
+            // (SAI_ROUTER_INTERFACE_ATTR_ADMIN_V4_STATE / _V6_STATE). Distinct from
+            // vpp_set_interface_state, which is link admin state.
+            sai_status_t vpp_set_interface_ip_enable (
+                    _In_ sai_object_id_t object_id,
+                    _In_ uint32_t vlan_id,
+                    _In_ bool v4_enable);
             // set ethernet interface mtu including L2 header
             sai_status_t vpp_set_port_mtu (
                     _In_ sai_object_id_t object_id,

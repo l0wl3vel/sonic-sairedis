@@ -310,6 +310,7 @@ typedef enum {
     extern int sw_interface_set_mtu(const char *hwif_name, uint32_t mtu);
     extern int sw_interface_set_mac(const char *hwif_name, uint8_t *mac_address);
     extern int sw_interface_ip6_enable_disable(const char *hwif_name, bool enable);
+    extern int sw_interface_ip4_enable_disable(const char *hwif_name, bool enable);
     extern int vpp_ip6_nd_ra_config(const char *hwif_name, bool suppress, uint32_t lifetime);
     extern int ip_vrf_add(uint32_t vrf_id, const char *vrf_name, bool is_ipv6);
     extern int ip_vrf_del(uint32_t vrf_id, const char *vrf_name, bool is_ipv6);
