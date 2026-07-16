@@ -1176,6 +1176,15 @@ namespace saivs
                     _In_ uint32_t vlan_id,
                     _Out_ std::string& ifname);
 
+            // Resolve a router interface to its VPP hardware/sub-interface name, for RIF
+            // types that map onto a real dataplane interface (PORT/SUB_PORT backed by a
+            // PORT or LAG). Returns false for RIF types with no attached wire interface
+            // here (VLAN/BVI, LOOPBACK) or on any attribute lookup failure; callers must
+            // treat false as "fall back to existing behavior", not as an error.
+            bool vpp_resolve_rif_hwif_name (
+                    _In_ sai_object_id_t rif_id,
+                    _Out_ std::string& hwif_name);
+
         public:
 
             virtual sai_status_t initialize_default_objects(

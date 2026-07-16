@@ -193,6 +193,18 @@ SwitchVpp::fillNHGrpMember(nexthop_grp_member_t *nxt_grp_member, sai_object_id_t
         attr.id = SAI_NEXT_HOP_ATTR_ROUTER_INTERFACE_ID;
         if (get(SAI_OBJECT_TYPE_NEXT_HOP, next_hop_oid, 1, &attr) == SAI_STATUS_SUCCESS) {
             nxt_grp_member->rif_oid = attr.value.oid;
+
+            std::string hwif_name;
+            if (vpp_resolve_rif_hwif_name(attr.value.oid, hwif_name)) {
+                uint32_t sw_if_index = vpp_get_swif_idx_by_name(hwif_name.c_str());
+                if (sw_if_index != (uint32_t) ~0) {
+                    nxt_grp_member->sw_if_index = sw_if_index;
+                } else {
+                    SWSS_LOG_WARN("hw interface %s for nexthop %s not found in VPP; "
+                                  "falling back to recursive resolution",
+                                  hwif_name.c_str(), nh_soid.c_str());
+                }
+            }
         }
         break;
     case SAI_NEXT_HOP_TYPE_TUNNEL_ENCAP: {

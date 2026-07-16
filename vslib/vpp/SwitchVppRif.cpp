@@ -385,6 +385,52 @@ bool SwitchVpp::vpp_get_hwif_name (
     return true;
 }
 
+bool SwitchVpp::vpp_resolve_rif_hwif_name (
+      _In_ sai_object_id_t rif_id,
+      _Out_ std::string& hwif_name)
+{
+    SWSS_LOG_ENTER();
+
+    sai_attribute_t attr;
+
+    attr.id = SAI_ROUTER_INTERFACE_ATTR_PORT_ID;
+    if (get(SAI_OBJECT_TYPE_ROUTER_INTERFACE, rif_id, 1, &attr) != SAI_STATUS_SUCCESS)
+    {
+        return false;
+    }
+
+    auto port_obj_type = objectTypeQuery(attr.value.oid);
+    if (port_obj_type != SAI_OBJECT_TYPE_PORT && port_obj_type != SAI_OBJECT_TYPE_LAG)
+    {
+        return false;
+    }
+    auto port_oid = attr.value.oid;
+
+    attr.id = SAI_ROUTER_INTERFACE_ATTR_TYPE;
+    if (get(SAI_OBJECT_TYPE_ROUTER_INTERFACE, rif_id, 1, &attr) != SAI_STATUS_SUCCESS)
+    {
+        return false;
+    }
+    if (attr.value.s32 != SAI_ROUTER_INTERFACE_TYPE_SUB_PORT &&
+        attr.value.s32 != SAI_ROUTER_INTERFACE_TYPE_PORT)
+    {
+        return false;
+    }
+
+    uint16_t vlan_id = 0;
+    if (attr.value.s32 == SAI_ROUTER_INTERFACE_TYPE_SUB_PORT)
+    {
+        attr.id = SAI_ROUTER_INTERFACE_ATTR_OUTER_VLAN_ID;
+        if (get(SAI_OBJECT_TYPE_ROUTER_INTERFACE, rif_id, 1, &attr) != SAI_STATUS_SUCCESS)
+        {
+            return false;
+        }
+        vlan_id = attr.value.u16;
+    }
+
+    return vpp_get_hwif_name(port_oid, vlan_id, hwif_name);
+}
+
 void SwitchVpp::vppProcessEvents ()
 {
     SWSS_LOG_ENTER();
