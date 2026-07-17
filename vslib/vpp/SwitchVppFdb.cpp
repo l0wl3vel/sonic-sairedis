@@ -836,6 +836,55 @@ sai_status_t SwitchVpp::vpp_create_bvi_interface(
     //Set interface state up
     interface_set_state(hw_ifname, true);
 
+    /*
+     * L3-enable the BVI and bind it to its tenant VRF (EVPN L3VNI symmetric
+     * IRB). The L3VNI SVI carries no IP address of its own, so without this the
+     * BVI stays a pure-L2 port: every routed nexthop over Vlan<id> (e.g. the
+     * tenant default route via the remote VTEP) can't form an adjacency and the
+     * route install fails with ip_route_add_del_get_stats(-3). See
+     * sonic-vpp-tenant-vxlan-l3vni-dataplane-handoff.md Bug 2 / FIX B. The BVI
+     * MAC is the SVI router MAC, already programmed by create_bvi_interface().
+     */
+    {
+        sai_object_id_t vrf_obj_id = SAI_NULL_OBJECT_ID;
+        auto attr_vrf = sai_metadata_get_attr_by_id(
+            SAI_ROUTER_INTERFACE_ATTR_VIRTUAL_ROUTER_ID, attr_count, attr_list);
+        if (attr_vrf != NULL) {
+            vrf_obj_id = attr_vrf->value.oid;
+        }
+
+        uint32_t bvi_vrf_id = 0;
+        auto vrf_info = vpp_get_ip_vrf(vrf_obj_id);
+        if (vrf_info) {
+            bvi_vrf_id = vrf_info->m_vrf_id;
+        } else {
+            /*
+             * The BVI RIF may be created before any physical RIF in this VRF,
+             * so the virtual router may not be in the map yet. Fall back to the
+             * kernel SVI netdev's table id and make sure the VRF tables exist
+             * (v4 + v6, per FIX A) before binding.
+             */
+            std::string svi_linux = std::string("Vlan") + std::to_string(vlan_id);
+            if (vpp_get_vrf_id(svi_linux.c_str(), &bvi_vrf_id) != 0) {
+                bvi_vrf_id = 0;
+            }
+            if (bvi_vrf_id != 0) {
+                vpp_add_ip_vrf(vrf_obj_id, bvi_vrf_id);
+            }
+        }
+
+        if (bvi_vrf_id != 0) {
+            /* SW_INTERFACE_SET_TABLE is per address-family: bind both. */
+            set_interface_vrf(hw_ifname, 0, bvi_vrf_id, false);
+            set_interface_vrf(hw_ifname, 0, bvi_vrf_id, true);
+            /* Enable IP so adjacencies form on the address-less SVI. */
+            sw_interface_ip4_enable_disable(hw_ifname, true);
+            sw_interface_ip6_enable_disable(hw_ifname, true);
+            SWSS_LOG_NOTICE("L3-enabled BVI %s and bound to VRF %u (v4+v6)",
+                            hw_ifname, bvi_vrf_id);
+        }
+    }
+
     // BVI is the L3 endpoint of the BD and exchanges *untagged* frames
     // with the BD, matching the Linux model where Vlan<id> is presented
     // untagged to the IP stack. No vlan tag-rewrite on the BVI itself.
