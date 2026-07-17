@@ -477,6 +477,24 @@ namespace saivs
             bool is_tunnel_bridge_port(
                     _In_ sai_object_id_t br_port_id);
 
+            /**
+             * @brief Handle an FDB entry whose bridge port is a VXLAN tunnel.
+             *
+             * EVPN remote MACs are learned as FDB entries on a tunnel bridge
+             * port carrying SAI_FDB_ENTRY_ATTR_ENDPOINT_IP. Resolves the tunnel,
+             * VLAN/BD and endpoint, then delegates to the TunnelManager to
+             * lazily create (or ref/unref) the per-remote VXLAN tunnel and pin
+             * the MAC to it.
+             *
+             * @param[in] serializedObjectId The serialized FDB entry id.
+             * @param[in] br_port_id The tunnel bridge port id.
+             * @param[in] is_add true to add, false to remove.
+             */
+            sai_status_t vpp_evpn_remote_fdb_entry(
+                    _In_ const std::string &serializedObjectId,
+                    _In_ sai_object_id_t br_port_id,
+                    _In_ bool is_add);
+
             /* BFD Session */
             sai_status_t bfd_session_add(
                     _In_ const std::string &serializedObjectId,

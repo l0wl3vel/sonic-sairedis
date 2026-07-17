@@ -178,6 +178,41 @@ namespace saivs
         sai_status_t handle_l2_vxlan_tunnel_map_entry_removal(
             _In_ const std::string& serializedObjectId);
 
+        /**
+         * @brief Program the VPP encap for an EVPN remote-VTEP FDB entry.
+         *
+         * EVPN symmetric-IRB / L2 extension expresses a remote VTEP as an FDB
+         * entry (the remote MAC) whose bridge port is a TUNNEL and which carries
+         * SAI_FDB_ENTRY_ATTR_ENDPOINT_IP (the remote VTEP address). For a P2MP
+         * tunnel the per-remote unicast VXLAN tunnel does not exist yet, so it is
+         * created lazily here: build the src->dst VXLAN tunnel for the VNI mapped
+         * to vlan_id, add it to bridge-domain vlan_id, and install a static L2
+         * FDB entry (mac -> tunnel). Tunnels are ref-counted by (vlan_id,dst) so
+         * multiple remote MACs behind the same VTEP share one tunnel.
+         *
+         * @param tunnel_oid The SAI tunnel referenced by the FDB's bridge port.
+         * @param dst_ip     The remote VTEP address (FDB endpoint IP).
+         * @param vlan_id    The bridge-domain / VLAN id of the FDB entry.
+         * @param mac        The remote MAC to pin to the tunnel.
+         * @return SAI_STATUS_SUCCESS on success or if not applicable.
+         */
+        sai_status_t create_evpn_remote_fdb(
+            _In_ sai_object_id_t tunnel_oid,
+            _In_ const sai_ip_address_t& dst_ip,
+            _In_ uint16_t vlan_id,
+            _In_ const sai_mac_t mac);
+
+        /**
+         * @brief Remove the VPP encap for an EVPN remote-VTEP FDB entry.
+         *
+         * Removes the static L2 FDB entry and, when the last MAC behind the
+         * (vlan_id,dst) tunnel is gone, tears down the VXLAN tunnel.
+         */
+        sai_status_t remove_evpn_remote_fdb(
+            _In_ const sai_ip_address_t& dst_ip,
+            _In_ uint16_t vlan_id,
+            _In_ const sai_mac_t mac);
+
     private:
         SwitchVpp* m_switch_db;
         std::array<uint8_t, 6> m_router_mac;
@@ -186,6 +221,39 @@ namespace saivs
         std::unordered_map<sai_object_id_t, TunnelVPPData> m_tunnel_encap_nexthop_map;
         // Map from VNI to VPP tunnel data (L2 VXLAN / EVPN)
         std::unordered_map<uint32_t, TunnelVPPData> m_l2_tunnel_map;
+
+        /**
+         * @brief Key for an EVPN remote-VTEP VXLAN tunnel.
+         *
+         * A tunnel is uniquely identified by its bridge-domain (vlan_id, which
+         * is 1:1 with the VNI) and the remote VTEP address. Multiple remote MACs
+         * behind the same VTEP share one tunnel via refcount.
+         */
+        struct L2VtepKey {
+            uint16_t vlan_id;
+            sai_ip_address_t dst;
+            bool operator==(const L2VtepKey& o) const;
+        };
+        struct L2VtepKeyHash {
+            std::size_t operator()(const L2VtepKey& k) const;
+        };
+        struct L2VtepTunnel {
+            uint32_t sw_if_index;
+            uint16_t vlan_id;
+            uint32_t vni;
+            sai_ip_address_t src_ip;
+            uint32_t refcount;
+        };
+        std::unordered_map<L2VtepKey, L2VtepTunnel, L2VtepKeyHash> m_l2_remote_vtep_map;
+
+        /**
+         * @brief Resolve the VNI mapped to vlan_id via the tunnel's
+         *        VNI_TO_VLAN_ID decap mappers.
+         */
+        sai_status_t resolve_vni_for_vlan(
+            _In_ sai_object_id_t tunnel_oid,
+            _In_ uint16_t vlan_id,
+            _Out_ uint32_t& vni);
 
         sai_status_t tunnel_encap_nexthop_action(
                         _In_ const SaiObject* tunnel_nh_obj,

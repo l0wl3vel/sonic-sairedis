@@ -1632,6 +1632,63 @@ sai_status_t SwitchVpp::vpp_remove_lag_member(
     return SAI_STATUS_SUCCESS;
 }
 
+sai_status_t SwitchVpp::vpp_evpn_remote_fdb_entry(
+        _In_ const std::string &serializedObjectId,
+        _In_ sai_object_id_t br_port_id,
+        _In_ bool is_add)
+{
+    SWSS_LOG_ENTER();
+
+    sai_fdb_entry_t fdb_entry;
+    sai_deserialize_fdb_entry(serializedObjectId, fdb_entry);
+
+    // Remote VTEP address. Without an endpoint IP there is nothing to encap
+    // (e.g. a local/flood tunnel port) -- leave it to normal L2 learning.
+    sai_attribute_t attr;
+    attr.id = SAI_FDB_ENTRY_ATTR_ENDPOINT_IP;
+    if (get(SAI_OBJECT_TYPE_FDB_ENTRY, serializedObjectId, 1, &attr) != SAI_STATUS_SUCCESS)
+    {
+        SWSS_LOG_NOTICE("EVPN FDB: no ENDPOINT_IP on %s, skipping tunnel encap",
+                serializedObjectId.c_str());
+        return SAI_STATUS_SUCCESS;
+    }
+    sai_ip_address_t endpoint_ip = attr.value.ipaddr;
+
+    // Tunnel referenced by the tunnel bridge port.
+    attr.id = SAI_BRIDGE_PORT_ATTR_TUNNEL_ID;
+    if (get(SAI_OBJECT_TYPE_BRIDGE_PORT, br_port_id, 1, &attr) != SAI_STATUS_SUCCESS)
+    {
+        SWSS_LOG_ERROR("EVPN FDB: bridge port %s missing TUNNEL_ID",
+                sai_serialize_object_id(br_port_id).c_str());
+        return SAI_STATUS_FAILURE;
+    }
+    sai_object_id_t tunnel_oid = attr.value.oid;
+
+    // Bridge-domain / VLAN id from the FDB entry's bv_id.
+    if (objectTypeQuery(fdb_entry.bv_id) != SAI_OBJECT_TYPE_VLAN)
+    {
+        SWSS_LOG_NOTICE("EVPN FDB: bv_id %s is not a VLAN, skipping",
+                sai_serialize_object_id(fdb_entry.bv_id).c_str());
+        return SAI_STATUS_SUCCESS;
+    }
+    attr.id = SAI_VLAN_ATTR_VLAN_ID;
+    if (get(SAI_OBJECT_TYPE_VLAN, fdb_entry.bv_id, 1, &attr) != SAI_STATUS_SUCCESS)
+    {
+        SWSS_LOG_ERROR("EVPN FDB: could not get VLAN id from bv_id %s",
+                sai_serialize_object_id(fdb_entry.bv_id).c_str());
+        return SAI_STATUS_FAILURE;
+    }
+    uint16_t vlan_id = attr.value.u16;
+
+    if (is_add)
+    {
+        return m_tunnel_mgr.create_evpn_remote_fdb(
+                tunnel_oid, endpoint_ip, vlan_id, fdb_entry.mac_address);
+    }
+    return m_tunnel_mgr.remove_evpn_remote_fdb(
+            endpoint_ip, vlan_id, fdb_entry.mac_address);
+}
+
 sai_status_t SwitchVpp::FdbEntryadd(
         _In_ const std::string &serializedObjectId,
         _In_ sai_object_id_t switch_id,
@@ -1711,13 +1768,11 @@ sai_status_t SwitchVpp::vpp_fdbentry_add(
         return SAI_STATUS_FAILURE;
     }
 
-    // Skip VPP FDB add for tunnel bridge ports -- L2 VXLAN FDB is handled
-    // separately via the EVPN remote-MAC path, not the per-port FDB path
+    // Tunnel bridge port: EVPN remote-MAC / remote-VTEP path. Create (or ref)
+    // the per-remote VXLAN tunnel and pin the MAC to it.
     if (is_tunnel_bridge_port(br_port_id))
     {
-        SWSS_LOG_NOTICE("Skipping FDB add for tunnel bridge port %s",
-                sai_serialize_object_id(br_port_id).c_str());
-        return SAI_STATUS_SUCCESS;
+        return vpp_evpn_remote_fdb_entry(serializedObjectId, br_port_id, /*is_add=*/true);
     }
 
     auto br_port_attrs = m_objectHash.at(SAI_OBJECT_TYPE_BRIDGE_PORT).at(sai_serialize_object_id(br_port_id));
@@ -1827,12 +1882,11 @@ sai_status_t SwitchVpp::vpp_fdbentry_del(
         return SAI_STATUS_FAILURE;
     }
 
-    // Skip VPP FDB delete for tunnel bridge ports
+    // Tunnel bridge port: EVPN remote-MAC / remote-VTEP path. Remove the pinned
+    // MAC and, when the last MAC behind this remote VTEP is gone, the tunnel.
     if (is_tunnel_bridge_port(br_port_id))
     {
-        SWSS_LOG_NOTICE("Skipping FDB delete for tunnel bridge port %s",
-                sai_serialize_object_id(br_port_id).c_str());
-        return SAI_STATUS_SUCCESS;
+        return vpp_evpn_remote_fdb_entry(serializedObjectId, br_port_id, /*is_add=*/false);
     }
 
     auto br_port_attrs = m_objectHash.at(SAI_OBJECT_TYPE_BRIDGE_PORT).at(sai_serialize_object_id(br_port_id));

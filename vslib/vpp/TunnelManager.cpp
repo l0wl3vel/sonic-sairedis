@@ -767,6 +767,228 @@ TunnelManager::handle_l2_vxlan_tunnel_map_entry_removal(
     return SAI_STATUS_SUCCESS;
 }
 
+bool TunnelManager::L2VtepKey::operator==(const L2VtepKey& o) const
+{
+    SWSS_LOG_ENTER();
+
+    return vlan_id == o.vlan_id && sai_ip_address_equal(dst, o.dst);
+}
+
+std::size_t TunnelManager::L2VtepKeyHash::operator()(const L2VtepKey& k) const
+{
+    SWSS_LOG_ENTER();
+
+    std::size_t h = std::hash<uint16_t>()(k.vlan_id);
+    if (k.dst.addr_family == SAI_IP_ADDR_FAMILY_IPV4) {
+        h ^= std::hash<uint32_t>()(k.dst.addr.ip4) << 1;
+    } else {
+        uint64_t tmp;
+        memcpy(&tmp, k.dst.addr.ip6, sizeof(tmp));
+        h ^= std::hash<uint64_t>()(tmp) << 1;
+    }
+    return h;
+}
+
+sai_status_t
+TunnelManager::resolve_vni_for_vlan(
+    _In_ sai_object_id_t tunnel_oid,
+    _In_ uint16_t vlan_id,
+    _Out_ uint32_t& vni)
+{
+    SWSS_LOG_ENTER();
+
+    vni = 0;
+
+    auto tunnel_obj = m_switch_db->get_sai_object(SAI_OBJECT_TYPE_TUNNEL,
+        sai_serialize_object_id(tunnel_oid));
+    if (!tunnel_obj) {
+        return SAI_STATUS_ITEM_NOT_FOUND;
+    }
+
+    sai_attribute_t attr;
+    auto decap_mappers = tunnel_obj->get_linked_objects(
+        SAI_OBJECT_TYPE_TUNNEL_MAP, SAI_TUNNEL_ATTR_DECAP_MAPPERS);
+
+    for (auto mapper : decap_mappers) {
+        attr.id = SAI_TUNNEL_MAP_ATTR_TYPE;
+        if (mapper->get_attr(attr) != SAI_STATUS_SUCCESS) continue;
+        if (attr.value.s32 != SAI_TUNNEL_MAP_TYPE_VNI_TO_VLAN_ID) continue;
+
+        auto entries = mapper->get_child_objs(SAI_OBJECT_TYPE_TUNNEL_MAP_ENTRY);
+        if (!entries) continue;
+
+        for (auto& pair : *entries) {
+            auto entry = pair.second;
+            uint16_t e_vlan = 0;
+            uint32_t e_vni = 0;
+
+            attr.id = SAI_TUNNEL_MAP_ENTRY_ATTR_VLAN_ID_VALUE;
+            if (entry->get_attr(attr) == SAI_STATUS_SUCCESS) e_vlan = attr.value.u16;
+
+            attr.id = SAI_TUNNEL_MAP_ENTRY_ATTR_VNI_ID_KEY;
+            if (entry->get_attr(attr) == SAI_STATUS_SUCCESS) e_vni = attr.value.u32;
+
+            if (e_vlan == vlan_id && e_vni != 0) {
+                vni = e_vni;
+                return SAI_STATUS_SUCCESS;
+            }
+        }
+    }
+
+    return SAI_STATUS_ITEM_NOT_FOUND;
+}
+
+sai_status_t
+TunnelManager::create_evpn_remote_fdb(
+    _In_ sai_object_id_t tunnel_oid,
+    _In_ const sai_ip_address_t& dst_ip,
+    _In_ uint16_t vlan_id,
+    _In_ const sai_mac_t mac)
+{
+    SWSS_LOG_ENTER();
+
+    auto tunnel_obj = m_switch_db->get_sai_object(SAI_OBJECT_TYPE_TUNNEL,
+        sai_serialize_object_id(tunnel_oid));
+    if (!tunnel_obj) {
+        SWSS_LOG_ERROR("EVPN FDB: tunnel %s not found",
+            sai_serialize_object_id(tunnel_oid).c_str());
+        return SAI_STATUS_FAILURE;
+    }
+
+    sai_attribute_t attr;
+    attr.id = SAI_TUNNEL_ATTR_ENCAP_SRC_IP;
+    CHECK_STATUS_W_MSG(tunnel_obj->get_attr(attr),
+        "EVPN FDB: missing SAI_TUNNEL_ATTR_ENCAP_SRC_IP in %s",
+        sai_serialize_object_id(tunnel_oid).c_str());
+    sai_ip_address_t src_ip = attr.value.ipaddr;
+
+    uint32_t vni = 0;
+    if (resolve_vni_for_vlan(tunnel_oid, vlan_id, vni) != SAI_STATUS_SUCCESS || vni == 0) {
+        SWSS_LOG_ERROR("EVPN FDB: could not resolve VNI for vlan %u (tunnel %s)",
+            vlan_id, sai_serialize_object_id(tunnel_oid).c_str());
+        return SAI_STATUS_FAILURE;
+    }
+
+    L2VtepKey key;
+    key.vlan_id = vlan_id;
+    key.dst = dst_ip;
+
+    uint32_t sw_if_index;
+    auto it = m_l2_remote_vtep_map.find(key);
+    if (it == m_l2_remote_vtep_map.end()) {
+        vpp_vxlan_tunnel_t req;
+        memset(&req, 0, sizeof(req));
+        req.vni = vni;
+        req.src_port = m_vxlan_port;
+        req.dst_port = m_vxlan_port;
+        req.instance = ~0;
+        req.decap_next_index = ~0;
+        sai_ip_address_t dst = dst_ip;  // mutable copy for the xlate helper
+        sai_ip_address_t_to_vpp_ip_addr_t(src_ip, req.src_address);
+        sai_ip_address_t_to_vpp_ip_addr_t(dst, req.dst_address);
+
+        TunnelVPPData tunnel_data;
+        tunnel_data.vni = vni;
+        tunnel_data.src_ip = src_ip;
+        tunnel_data.dst_ip = dst_ip;
+        tunnel_data.vlan_id = vlan_id;
+        tunnel_data.ip_vrf = nullptr;
+
+        if (create_vpp_vxlan_encap(req, tunnel_data, /*skip_neighbor=*/true) != SAI_STATUS_SUCCESS) {
+            SWSS_LOG_ERROR("EVPN FDB: failed to create vxlan tunnel vni=%u vlan=%u", vni, vlan_id);
+            return SAI_STATUS_FAILURE;
+        }
+
+        if (set_sw_interface_l2_bridge_by_index(
+                tunnel_data.sw_if_index, vlan_id, true, VPP_API_PORT_TYPE_NORMAL) != 0) {
+            SWSS_LOG_ERROR("EVPN FDB: failed to add tunnel sw_if %u to BD %u",
+                tunnel_data.sw_if_index, vlan_id);
+            remove_vpp_vxlan_encap(req, tunnel_data, /*skip_neighbor=*/true);
+            return SAI_STATUS_FAILURE;
+        }
+
+        L2VtepTunnel t;
+        t.sw_if_index = tunnel_data.sw_if_index;
+        t.vlan_id = vlan_id;
+        t.vni = vni;
+        t.src_ip = src_ip;
+        t.refcount = 1;
+        m_l2_remote_vtep_map[key] = t;
+        sw_if_index = tunnel_data.sw_if_index;
+
+        char dst_str[INET6_ADDRSTRLEN];
+        vpp_ip_addr_t_to_string(&req.dst_address, dst_str, sizeof(dst_str));
+        SWSS_LOG_NOTICE("EVPN FDB: created remote VTEP tunnel sw_if=%u vni=%u vlan=%u dst=%s",
+            sw_if_index, vni, vlan_id, dst_str);
+    } else {
+        it->second.refcount++;
+        sw_if_index = it->second.sw_if_index;
+    }
+
+    const char* tun_ifname = vpp_get_swif_name(sw_if_index);
+    if (tun_ifname) {
+        int ret = l2fib_add_del(tun_ifname, mac, vlan_id, /*is_add=*/true, /*is_static=*/true);
+        SWSS_LOG_NOTICE("EVPN FDB: l2fib add mac %02x:%02x:%02x:%02x:%02x:%02x on %s bd %u ret %d",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], tun_ifname, vlan_id, ret);
+    } else {
+        SWSS_LOG_ERROR("EVPN FDB: no interface name for tunnel sw_if %u", sw_if_index);
+        return SAI_STATUS_FAILURE;
+    }
+
+    return SAI_STATUS_SUCCESS;
+}
+
+sai_status_t
+TunnelManager::remove_evpn_remote_fdb(
+    _In_ const sai_ip_address_t& dst_ip,
+    _In_ uint16_t vlan_id,
+    _In_ const sai_mac_t mac)
+{
+    SWSS_LOG_ENTER();
+
+    L2VtepKey key;
+    key.vlan_id = vlan_id;
+    key.dst = dst_ip;
+
+    auto it = m_l2_remote_vtep_map.find(key);
+    if (it == m_l2_remote_vtep_map.end()) {
+        SWSS_LOG_NOTICE("EVPN FDB: no remote VTEP tunnel for vlan %u on delete", vlan_id);
+        return SAI_STATUS_SUCCESS;
+    }
+
+    const char* tun_ifname = vpp_get_swif_name(it->second.sw_if_index);
+    if (tun_ifname) {
+        l2fib_add_del(tun_ifname, mac, vlan_id, /*is_add=*/false, /*is_static=*/true);
+    }
+
+    if (--it->second.refcount == 0) {
+        set_sw_interface_l2_bridge_by_index(
+            it->second.sw_if_index, vlan_id, false, VPP_API_PORT_TYPE_NORMAL);
+
+        vpp_vxlan_tunnel_t req;
+        memset(&req, 0, sizeof(req));
+        req.vni = it->second.vni;
+        req.src_port = m_vxlan_port;
+        req.dst_port = m_vxlan_port;
+        req.instance = ~0;
+        req.decap_next_index = ~0;
+        sai_ip_address_t dst = dst_ip;  // mutable copy for the xlate helper
+        sai_ip_address_t_to_vpp_ip_addr_t(it->second.src_ip, req.src_address);
+        sai_ip_address_t_to_vpp_ip_addr_t(dst, req.dst_address);
+
+        TunnelVPPData tunnel_data;
+        tunnel_data.sw_if_index = it->second.sw_if_index;
+        remove_vpp_vxlan_encap(req, tunnel_data, /*skip_neighbor=*/true);
+
+        SWSS_LOG_NOTICE("EVPN FDB: removed remote VTEP tunnel sw_if=%u vni=%u vlan=%u",
+            it->second.sw_if_index, it->second.vni, vlan_id);
+
+        m_l2_remote_vtep_map.erase(it);
+    }
+
+    return SAI_STATUS_SUCCESS;
+}
+
 TunnelManagerIpIp::TunnelManagerIpIp(SwitchVpp *switch_db) : m_switch_db(switch_db) {}
 
 uint8_t
