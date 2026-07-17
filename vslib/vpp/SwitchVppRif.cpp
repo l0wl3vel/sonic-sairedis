@@ -633,6 +633,10 @@ sai_status_t SwitchVpp::vpp_set_interface_ip_enable (
             SWSS_LOG_ERROR("failed to %s ipv4 for %s", (v4_enable ? "enable" : "disable"), hwif_name);
         }
         SWSS_LOG_NOTICE("Updating router interface ip4 enable %s -> %d", hwif_name, v4_enable);
+    } else {
+        SWSS_LOG_ERROR("cannot resolve hw interface for oid %s (vlan %u); ip4 %s NOT applied",
+                       sai_serialize_object_id(object_id).c_str(), vlan_id,
+                       v4_enable ? "enable" : "disable");
     }
     return SAI_STATUS_SUCCESS;
 }
