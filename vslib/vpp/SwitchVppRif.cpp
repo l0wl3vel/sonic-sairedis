@@ -1539,6 +1539,20 @@ int SwitchVpp::vpp_add_ip_vrf (_In_ sai_object_id_t objectId, uint32_t vrf_id)
         SWSS_LOG_NOTICE("VRF(%s) with id %u created in VS", sai_serialize_object_id(objectId).c_str(), vrf_id);
         vrf_objMap[objectId] = std::make_shared<IpVrfInfo>(objectId, vrf_id, vrf_name, false);
 
+        /*
+         * In VPP the IPv4 and IPv6 FIB tables for a given table_id are
+         * independent objects; ip_vrf_add only creates the family it is told
+         * to. Without an explicit IPv6 table every v6 route in this VRF fails
+         * with "ip_route_add_del_get_stats failed(-3)" (no such table). Create
+         * the matching IPv6 table so v6 tenant routes can install. Table 0 (the
+         * default VRF) always exists for both families, so skip it.
+         */
+        if (vrf_id) {
+            int ret6 = ip_vrf_add(vrf_id, vrf_name.c_str(), true);
+            SWSS_LOG_NOTICE("IPv6 VRF table for VRF(%s) with id %u created in VS, status %d",
+                            sai_serialize_object_id(objectId).c_str(), vrf_id, ret6);
+        }
+
         uint32_t hash_mask =  VPP_IP_API_FLOW_HASH_SRC_IP | VPP_IP_API_FLOW_HASH_DST_IP | \
             VPP_IP_API_FLOW_HASH_SRC_PORT | VPP_IP_API_FLOW_HASH_DST_PORT | \
             VPP_IP_API_FLOW_HASH_PROTO | VPP_IP_API_FLOW_HASH_PEEK_INNER;
@@ -1564,7 +1578,14 @@ int SwitchVpp::vpp_del_ip_vrf (_In_ sai_object_id_t objectId)
         auto sw = it->second;
         if (sw != nullptr) {
                  SWSS_LOG_NOTICE("Deleting VRF(%s) with id %u", sai_serialize_object_id(objectId).c_str(), sw->m_vrf_id);
-           ip_vrf_del(sw->m_vrf_id, sw->m_vrf_name.c_str(), sw->m_is_ipv6);
+           /*
+            * Tear down both the IPv4 and IPv6 tables created in
+            * vpp_add_ip_vrf. Table 0 always exists and must not be deleted.
+            */
+           if (sw->m_vrf_id) {
+               ip_vrf_del(sw->m_vrf_id, sw->m_vrf_name.c_str(), false);
+               ip_vrf_del(sw->m_vrf_id, sw->m_vrf_name.c_str(), true);
+           }
            vrf_objMap.erase(it);
         }
     }
