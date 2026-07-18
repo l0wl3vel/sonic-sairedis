@@ -267,12 +267,18 @@ namespace saivs
          * @param skip_neighbor When true, skip adding IP neighbor entries.
          *        Set to true for L2 VXLAN tunnels that don't need L3 neighbor
          *        entries for inner-ether forwarding.
+         * @param inner_dst_mac When non-null (and skip_neighbor is false), used
+         *        as the tunnel neighbor's MAC, i.e. the inner ethernet dst of the
+         *        encapped packet. This must be the remote VTEP's L3VNI router MAC
+         *        (SAI_NEXT_HOP_ATTR_TUNNEL_MAC) so the remote decaps and routes it.
+         *        When null, falls back to the local placeholder router MAC.
          * @return SAI_STATUS_SUCCESS on success, error status on failure.
          */
         sai_status_t create_vpp_vxlan_encap(
                         _In_  vpp_vxlan_tunnel_t& req,
                         _Out_ TunnelVPPData& tunnel_data,
-                        _In_  bool skip_neighbor = false);
+                        _In_  bool skip_neighbor = false,
+                        _In_  const uint8_t* inner_dst_mac = nullptr);
 
         /**
          * @brief Remove VPP VXLAN tunnel encapsulation.
@@ -281,12 +287,16 @@ namespace saivs
          * @param tunnel_data Tunnel data with sw_if_index of tunnel to remove.
          * @param skip_neighbor When true, skip removing IP neighbor entries.
          *        Must match the value used during creation.
+         * @param inner_dst_mac When non-null (and skip_neighbor is false), the MAC
+         *        used to program the neighbor at creation. Must match so the same
+         *        neighbor entry is removed. When null, falls back to the placeholder.
          * @return SAI_STATUS_SUCCESS on success, error status on failure.
          */
         sai_status_t remove_vpp_vxlan_encap(
                         _In_  vpp_vxlan_tunnel_t& req,
                         _In_ TunnelVPPData& tunnel_data,
-                        _In_  bool skip_neighbor = false);
+                        _In_  bool skip_neighbor = false,
+                        _In_  const uint8_t* inner_dst_mac = nullptr);
 
         sai_status_t create_vpp_vxlan_decap(
                         _Out_ TunnelVPPData& tunnel_data);

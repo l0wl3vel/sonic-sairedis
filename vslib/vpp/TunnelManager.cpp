@@ -153,6 +153,20 @@ TunnelManager::tunnel_encap_nexthop_action(
 
     dst_ip = attr.value.ipaddr;
 
+    /* Inner destination MAC for the encapped frame. Prefer the per-nexthop
+     * SAI_NEXT_HOP_ATTR_TUNNEL_MAC (the remote VTEP's L3VNI router MAC); if it is
+     * absent, fall back to the placeholder router MAC by leaving inner_dst_mac null. */
+    sai_mac_t                    tunnel_mac;
+    const uint8_t*               inner_dst_mac = nullptr;
+    attr.id = SAI_NEXT_HOP_ATTR_TUNNEL_MAC;
+    if (tunnel_nh_obj->get_attr(attr) == SAI_STATUS_SUCCESS) {
+        memcpy(tunnel_mac, attr.value.mac, sizeof(tunnel_mac));
+        inner_dst_mac = tunnel_mac;
+    } else {
+        SWSS_LOG_WARN("Missing SAI_NEXT_HOP_ATTR_TUNNEL_MAC in %s; using placeholder router MAC",
+            tunnel_nh_obj->get_id().c_str());
+    }
+
     // Iterate tunnel encap mapper
     auto tunnel_encap_mappers = tunnel_obj->get_linked_objects(SAI_OBJECT_TYPE_TUNNEL_MAP, SAI_TUNNEL_ATTR_ENCAP_MAPPERS);
 
@@ -207,7 +221,7 @@ TunnelManager::tunnel_encap_nexthop_action(
             req.vni = tunnel_vni;
 
             if (action == Action::CREATE) {
-                if (create_vpp_vxlan_encap(req, tunnel_data) != SAI_STATUS_SUCCESS) {
+                if (create_vpp_vxlan_encap(req, tunnel_data, /*skip_neighbor=*/false, inner_dst_mac) != SAI_STATUS_SUCCESS) {
                     SWSS_LOG_ERROR("Failed to create vxlan encap for %s",
                         tunnel_nh_obj->get_id().c_str());
                     return SAI_STATUS_FAILURE;
@@ -216,7 +230,7 @@ TunnelManager::tunnel_encap_nexthop_action(
                 if (create_vpp_vxlan_decap(tunnel_data) != SAI_STATUS_SUCCESS) {
                     SWSS_LOG_ERROR("Failed to create vxlan decap for %s",
                         tunnel_nh_obj->get_id().c_str());
-                    remove_vpp_vxlan_encap(req, tunnel_data);
+                    remove_vpp_vxlan_encap(req, tunnel_data, /*skip_neighbor=*/false, inner_dst_mac);
                     return SAI_STATUS_FAILURE;
                 }
                 m_tunnel_encap_nexthop_map[object_id] = tunnel_data;
@@ -229,7 +243,7 @@ TunnelManager::tunnel_encap_nexthop_action(
                     continue;
                 }
                 remove_vpp_vxlan_decap(encap_map_it->second);
-                remove_vpp_vxlan_encap(req, encap_map_it->second);
+                remove_vpp_vxlan_encap(req, encap_map_it->second, /*skip_neighbor=*/false, inner_dst_mac);
 
                 m_tunnel_encap_nexthop_map.erase(encap_map_it);
             }
@@ -269,7 +283,8 @@ sai_status_t
 TunnelManager::create_vpp_vxlan_encap(
                     _In_  vpp_vxlan_tunnel_t& req,
                     _Out_ TunnelVPPData& tunnel_data,
-                    _In_  bool skip_neighbor)
+                    _In_  bool skip_neighbor,
+                    _In_  const uint8_t* inner_dst_mac)
 {
     SWSS_LOG_ENTER();
 
@@ -278,7 +293,12 @@ TunnelManager::create_vpp_vxlan_encap(
     char                        src_ip_str[INET6_ADDRSTRLEN];
     char                        dst_ip_str[INET6_ADDRSTRLEN];
     auto                        router_mac = get_router_mac();
-    auto                        bvi_mac = router_mac.data();
+    /* The tunnel neighbor's MAC becomes the inner ethernet dst of the encapped
+     * packet. For an EVPN L3VNI tunnel-encap nexthop it must be the remote VTEP's
+     * router MAC (SAI_NEXT_HOP_ATTR_TUNNEL_MAC); otherwise the remote decaps but
+     * cannot route the inner frame. Fall back to the placeholder router MAC only
+     * when no per-nexthop MAC is supplied. */
+    auto                        bvi_mac = inner_dst_mac ? inner_dst_mac : router_mac.data();
 
     vpp_status = vpp_vxlan_tunnel_add_del(&req, 1, &sw_if_index);
     vpp_ip_addr_t_to_string(&req.src_address, src_ip_str, INET6_ADDRSTRLEN);
@@ -294,10 +314,12 @@ TunnelManager::create_vpp_vxlan_encap(
 
     if (!skip_neighbor) {
         /* the neighbour is to build inner ether. use no_fib_entry to avoid creating the nh in the fib, which will mess up underlay forwarding*/
+        SWSS_LOG_INFO("vxlan tunnel %d inner dst mac %02x:%02x:%02x:%02x:%02x:%02x",
+                sw_if_index, bvi_mac[0], bvi_mac[1], bvi_mac[2], bvi_mac[3], bvi_mac[4], bvi_mac[5]);
         if (req.dst_address.sa_family == AF_INET6) {
-            ip6_nbr_add_del(NULL, sw_if_index, &req.dst_address.addr.ip6, false, true/*no_fib_entry*/, bvi_mac, 1);
+            ip6_nbr_add_del(NULL, sw_if_index, &req.dst_address.addr.ip6, false, true/*no_fib_entry*/, const_cast<uint8_t*>(bvi_mac), 1);
         } else {
-            ip4_nbr_add_del(NULL, sw_if_index, &req.dst_address.addr.ip4, false, true/*no_fib_entry*/, bvi_mac, 1);
+            ip4_nbr_add_del(NULL, sw_if_index, &req.dst_address.addr.ip4, false, true/*no_fib_entry*/, const_cast<uint8_t*>(bvi_mac), 1);
         }
     }
 
@@ -309,7 +331,8 @@ sai_status_t
 TunnelManager::remove_vpp_vxlan_encap(
                     _In_  vpp_vxlan_tunnel_t& req,
                     _In_ TunnelVPPData& tunnel_data,
-                    _In_  bool skip_neighbor)
+                    _In_  bool skip_neighbor,
+                    _In_  const uint8_t* inner_dst_mac)
 {
     SWSS_LOG_ENTER();
 
@@ -318,13 +341,14 @@ TunnelManager::remove_vpp_vxlan_encap(
     char                        src_ip_str[INET6_ADDRSTRLEN];
     char                        dst_ip_str[INET6_ADDRSTRLEN];
     auto                        router_mac = get_router_mac();
-    auto                        bvi_mac = router_mac.data();
+    /* Must match the MAC used at create time (see create_vpp_vxlan_encap). */
+    auto                        bvi_mac = inner_dst_mac ? inner_dst_mac : router_mac.data();
 
     if (!skip_neighbor) {
         if (req.dst_address.sa_family == AF_INET6) {
-            ip6_nbr_add_del(NULL, tunnel_data.sw_if_index, &req.dst_address.addr.ip6, false, true/*no_fib_entry*/, bvi_mac, 0);
+            ip6_nbr_add_del(NULL, tunnel_data.sw_if_index, &req.dst_address.addr.ip6, false, true/*no_fib_entry*/, const_cast<uint8_t*>(bvi_mac), 0);
         } else {
-            ip4_nbr_add_del(NULL, tunnel_data.sw_if_index, &req.dst_address.addr.ip4, false, true/*no_fib_entry*/, bvi_mac, 0);
+            ip4_nbr_add_del(NULL, tunnel_data.sw_if_index, &req.dst_address.addr.ip4, false, true/*no_fib_entry*/, const_cast<uint8_t*>(bvi_mac), 0);
         }
     }
 
