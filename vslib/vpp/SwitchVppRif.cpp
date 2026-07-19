@@ -1801,7 +1801,18 @@ sai_status_t SwitchVpp::vpp_create_router_interface(
 	    hwif_name = tap_to_hwif_name(dev);
 	}
 	SWSS_LOG_NOTICE("Setting interface vrf on hwif_name %s", hwif_name);
+	/*
+	 * VPP keeps per-AF interface->table bindings separately
+	 * (sw_interface_set_table is_ipv6 selects the table). Bind BOTH the
+	 * IPv4 and IPv6 tables to this VRF: without the v6 binding the RIF's
+	 * IPv6 lookups fall through to the global table 0 (fib 0) and every
+	 * v6 packet on a tenant/VRF RIF is dropped at ip6-drop, even though
+	 * the v6 route in the VRF is healthy. This mirrors the BVI path in
+	 * SwitchVppFdb (set_interface_vrf ... false / ... true).
+	 * See sonic-vpp-evpn-l3vni-v6-rif-table-handoff.md (Bug 6).
+	 */
 	set_interface_vrf(hwif_name, vlan_id, vrf_id, false);
+	set_interface_vrf(hwif_name, vlan_id, vrf_id, true);
     }
 
     /*
@@ -1974,8 +1985,10 @@ sai_status_t SwitchVpp::vpp_router_interface_remove_vrf(
     interface_ip_address_del_all(hwif_name);
 
     uint32_t vrf_id = 0;
-    /* For now support is only for ipv4 tables */
+    /* Reset both AF tables back to the global table 0, matching the create
+     * path which binds both v4 and v6 to the RIF's VRF. */
     set_interface_vrf(hwif_name, 0, vrf_id, false);
+    set_interface_vrf(hwif_name, 0, vrf_id, true);
 
     return SAI_STATUS_SUCCESS;
 }
