@@ -596,6 +596,12 @@ namespace saivs
         private: // VPP
 
             std::map<sai_object_id_t, std::shared_ptr<IpVrfInfo>> vrf_objMap;
+            // Tenant L3VNI SVI (Vlan<id>/bvi<id>) tracked by VRF, so the VXLAN decap
+            // path can bind an L3VNI tunnel to the *same* bridge-domain as the
+            // tenant's IRB (BD id == vlan_id) instead of a private dynamic BD/BVI.
+            // Populated in vpp_create_bvi_interface(), erased in
+            // vpp_delete_bvi_interface(). See TunnelManager::create_vpp_vxlan_decap.
+            std::map<uint32_t, uint32_t> m_l3vni_vlan_to_vrf_map;
             bool nbr_env_read = false;
             // nbr_active is true by default, can be set to false by env var NO_LINUX_NL = n.
             // If false, it will rely on linux_nl_plugin to sync ip to VPP.
@@ -794,6 +800,14 @@ namespace saivs
 
             std::shared_ptr<IpVrfInfo> vpp_get_ip_vrf(
                     _In_ sai_object_id_t objectId);
+
+            // Look up the bridge-domain (== VLAN ID) of the tenant L3VNI SVI bound
+            // to vrf_id, if one has been created (SAI_ROUTER_INTERFACE_TYPE_VLAN
+            // with SAI_ROUTER_INTERFACE_ATTR_VIRTUAL_ROUTER_ID == vrf_id). Returns
+            // false if this VRF has no such SVI yet.
+            bool vpp_get_l3vni_bd_id(
+                    _In_ uint32_t vrf_id,
+                    _Out_ uint32_t &bd_id);
 
             sai_status_t addRemoveIpNbr(
                     _In_ const std::string &serializedObjectId,

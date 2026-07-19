@@ -882,6 +882,10 @@ sai_status_t SwitchVpp::vpp_create_bvi_interface(
             sw_interface_ip6_enable_disable(hw_ifname, true);
             SWSS_LOG_NOTICE("L3-enabled BVI %s and bound to VRF %u (v4+v6)",
                             hw_ifname, bvi_vrf_id);
+            /* Record so an L3VNI VXLAN decap tunnel for this VRF (created later,
+             * as EVPN routes arrive) can be bound to this BD instead of a private
+             * dynamic one. See TunnelManager::create_vpp_vxlan_decap. */
+            m_l3vni_vlan_to_vrf_map[vlan_id] = bvi_vrf_id;
         }
     }
 
@@ -988,7 +992,26 @@ sai_status_t SwitchVpp::vpp_delete_bvi_interface(
     // refresh interfaces from VS
     refresh_interfaces_list();
 
+    m_l3vni_vlan_to_vrf_map.erase(vlan_id);
+
     return SAI_STATUS_SUCCESS;
+}
+
+bool SwitchVpp::vpp_get_l3vni_bd_id(
+        _In_ uint32_t vrf_id,
+        _Out_ uint32_t &bd_id)
+{
+    SWSS_LOG_ENTER();
+
+    for (const auto &kv : m_l3vni_vlan_to_vrf_map)
+    {
+        if (kv.second == vrf_id)
+        {
+            bd_id = kv.first;
+            return true;
+        }
+    }
+    return false;
 }
 
 sai_status_t SwitchVpp::get_lag_bond_info(const sai_object_id_t lag_id, platform_bond_info_t &bond_info)

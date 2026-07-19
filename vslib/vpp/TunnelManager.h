@@ -30,6 +30,11 @@ namespace saivs
         u_int32_t encap_vrf_id = 0;
         u_int32_t bd_id = 0;
         vpp_ip_addr_t bvi_addr;
+        // True if this tunnel privately owns bd_id (dynamically allocated BD +
+        // BVI, torn down with the tunnel). False if bd_id is a tenant L3VNI SVI's
+        // bridge-domain (Vlan<id>/bvi<id>) shared with that SVI: only the tunnel's
+        // BD membership is removed on teardown, the BD/BVI itself is left alone.
+        bool owns_bd = true;
 
         // L2 VXLAN fields
         u_int32_t vni = 0;

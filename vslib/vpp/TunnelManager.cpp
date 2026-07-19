@@ -377,6 +377,30 @@ TunnelManager::create_vpp_vxlan_decap(
     vpp_ip_route_t              bvi_ip_prefix;
     uint32_t                    tunnel_if_index = tunnel_data.sw_if_index;
 
+    /* Pure L3VNI (symmetric IRB): if the tenant VRF already has an SVI/IRB
+     * (Vlan<id>/bvi<id>, created for the L3VNI by the RIF path), the decapped
+     * inner frame's dst MAC is that SVI's router MAC (learned via EVPN), so the
+     * tunnel's decap side must land in *that* bridge-domain, not a private one.
+     * Binding it to a fresh dynamic BD/BVI (the old behaviour below) leaves the
+     * tenant's real BVI unreachable from the tunnel and every return packet is
+     * dropped as "BVI L3 mac mismatch". See
+     * sonic-vpp-evpn-l3vni-tunnel-decap-bd-handoff.md. */
+    if (tunnel_data.ip_vrf) {
+        uint32_t l3vni_bd_id = 0;
+        if (m_switch_db->vpp_get_l3vni_bd_id(tunnel_data.ip_vrf->m_vrf_id, l3vni_bd_id)) {
+            vpp_status = set_sw_interface_l2_bridge_by_index(tunnel_if_index, l3vni_bd_id, true, VPP_API_PORT_TYPE_NORMAL);
+            if (vpp_status != 0) {
+                SWSS_LOG_ERROR("Failed to add tunnel interface %u to existing L3VNI BD %u", tunnel_if_index, l3vni_bd_id);
+                return SAI_STATUS_FAILURE;
+            }
+            tunnel_data.bd_id = l3vni_bd_id;
+            tunnel_data.owns_bd = false;
+            SWSS_LOG_NOTICE("bound decap of vxlan tunnel %u to existing L3VNI BD %u (VRF %u)",
+                                tunnel_if_index, l3vni_bd_id, tunnel_data.ip_vrf->m_vrf_id);
+            return SAI_STATUS_SUCCESS;
+        }
+    }
+
     //allocate bridge domain ID
     int bd_id = m_switch_db->dynamic_bd_id_pool.alloc();
     if (bd_id == -1) {
@@ -456,6 +480,15 @@ TunnelManager::remove_vpp_vxlan_decap(
     SWSS_LOG_ENTER();
 
     char                        hw_bvi_ifname[32];
+
+    if (!tunnel_data.owns_bd) {
+        /* BD/BVI belongs to the tenant L3VNI SVI (see create_vpp_vxlan_decap) --
+         * only unbind the tunnel interface from it, leave the BD/BVI in place. */
+        set_sw_interface_l2_bridge_by_index(tunnel_data.sw_if_index, tunnel_data.bd_id, false, VPP_API_PORT_TYPE_NORMAL);
+        SWSS_LOG_INFO("successfully unbound decap of vxlan tunnel %d from shared L3VNI BD %d",
+                            tunnel_data.sw_if_index, tunnel_data.bd_id);
+        return SAI_STATUS_SUCCESS;
+    }
 
     snprintf(hw_bvi_ifname, sizeof(hw_bvi_ifname), "bvi%u", tunnel_data.bd_id);
 
