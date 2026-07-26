@@ -886,6 +886,13 @@ sai_status_t SwitchVpp::vpp_create_bvi_interface(
              * as EVPN routes arrive) can be bound to this BD instead of a private
              * dynamic one. See TunnelManager::create_vpp_vxlan_decap. */
             m_l3vni_vlan_to_vrf_map[vlan_id] = bvi_vrf_id;
+
+            /* Reverse ordering: any L3VNI decap tunnel for this VRF created
+             * *before* this SVI/BVI existed was parked in a private dynamic BD
+             * (placeholder BVI MAC) and would blackhole routed return traffic as
+             * "BVI L3 mac mismatch". Reconcile them onto this L3VNI BD now.
+             * See HANDOFF-saivpp-vxlan-bd-bug.md. */
+            m_tunnel_mgr.rebind_l3vni_decap_tunnels(bvi_vrf_id, vlan_id);
         }
     }
 

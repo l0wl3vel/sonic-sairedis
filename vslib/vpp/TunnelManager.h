@@ -218,6 +218,26 @@ namespace saivs
             _In_ uint16_t vlan_id,
             _In_ const sai_mac_t mac);
 
+        /**
+         * @brief Re-bind L3VNI decap tunnels that were parked in a private BD.
+         *
+         * Reconciles the tunnel-before-RIF creation ordering: an EVPN L3VNI
+         * VXLAN decap tunnel created before its tenant SVI/BVI existed falls
+         * back to a private dynamic bridge-domain (with a placeholder BVI MAC),
+         * and decapped to-be-routed traffic is dropped as "BVI L3 mac mismatch".
+         * When the tenant SVI/BVI is later created (SwitchVpp::vpp_create_bvi_interface),
+         * this sweeps every decap tunnel for that VRF still parked in a private
+         * BD, moves it onto the real L3VNI bridge-domain, and tears the orphan
+         * BD/BVI down. Idempotent; the RIF-before-tunnel ordering is already
+         * handled inline by create_vpp_vxlan_decap. See HANDOFF-saivpp-vxlan-bd-bug.md.
+         *
+         * @param vrf_id       The tenant VRF whose L3VNI BD just became available.
+         * @param l3vni_bd_id  The bridge-domain of the newly created L3VNI SVI/BVI.
+         */
+        void rebind_l3vni_decap_tunnels(
+            _In_ uint32_t vrf_id,
+            _In_ uint32_t l3vni_bd_id);
+
     private:
         SwitchVpp* m_switch_db;
         std::array<uint8_t, 6> m_router_mac;

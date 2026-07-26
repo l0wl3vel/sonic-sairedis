@@ -503,6 +503,58 @@ TunnelManager::remove_vpp_vxlan_decap(
     return SAI_STATUS_SUCCESS;
 }
 
+void
+TunnelManager::rebind_l3vni_decap_tunnels(
+                    _In_ uint32_t vrf_id,
+                    _In_ uint32_t l3vni_bd_id)
+{
+    SWSS_LOG_ENTER();
+
+    /* Reverse-order reconcile: an L3VNI decap tunnel created before this VRF's
+     * SVI/BVI existed was parked in a private dynamic BD (create_vpp_vxlan_decap
+     * fallback). Now that the real L3VNI bridge-domain exists, move every such
+     * tunnel onto it and tear the orphan BD/BVI down. See
+     * HANDOFF-saivpp-vxlan-bd-bug.md. */
+    for (auto& kv : m_tunnel_encap_nexthop_map) {
+        TunnelVPPData& tunnel_data = kv.second;
+
+        if (!tunnel_data.ip_vrf || tunnel_data.ip_vrf->m_vrf_id != vrf_id) {
+            continue;
+        }
+        if (!tunnel_data.owns_bd || tunnel_data.bd_id == l3vni_bd_id) {
+            /* Already on the shared L3VNI BD (or nothing to move). */
+            continue;
+        }
+
+        uint32_t old_bd_id = tunnel_data.bd_id;
+        uint32_t tunnel_if_index = tunnel_data.sw_if_index;
+        char     hw_bvi_ifname[32];
+
+        /* Unbind the tunnel from the private BD before tearing it down. */
+        set_sw_interface_l2_bridge_by_index(tunnel_if_index, old_bd_id, false, VPP_API_PORT_TYPE_NORMAL);
+
+        /* Tear down the private BVI/BD (mirrors remove_vpp_vxlan_decap). */
+        snprintf(hw_bvi_ifname, sizeof(hw_bvi_ifname), "bvi%u", old_bd_id);
+        delete_bvi_interface(hw_bvi_ifname);
+        m_switch_db->dynamic_bd_id_pool.free(old_bd_id);
+        refresh_interfaces_list();
+        vpp_bridge_domain_add_del(old_bd_id, false);
+
+        /* Bind the tunnel onto the real L3VNI bridge-domain. */
+        int vpp_status = set_sw_interface_l2_bridge_by_index(tunnel_if_index, l3vni_bd_id, true, VPP_API_PORT_TYPE_NORMAL);
+        if (vpp_status != 0) {
+            SWSS_LOG_ERROR("Failed to rebind L3VNI decap tunnel %u from private BD %u onto BD %u (VRF %u)",
+                                tunnel_if_index, old_bd_id, l3vni_bd_id, vrf_id);
+            continue;
+        }
+
+        tunnel_data.bd_id = l3vni_bd_id;
+        tunnel_data.owns_bd = false;
+        SWSS_LOG_NOTICE("rebound L3VNI decap tunnel %u from private BD %u onto L3VNI BD %u (VRF %u)",
+                            tunnel_if_index, old_bd_id, l3vni_bd_id, vrf_id);
+    }
+}
+
 sai_status_t
 TunnelManager::create_l2_vxlan_tunnel_for_vni(
     _In_ sai_ip_address_t src_ip,
